@@ -299,7 +299,7 @@ impl Board {
             clocks: vec![24_000_000; 96],
             dot_pitch: Some(264),
             chip_revision: 0x20,
-            ..Board::base(2048, 1536, 0, 2, 0, "MD510")
+            ..Board::base(1536, 2048, 0, 2, 0, "MD510")
         }
     }
 

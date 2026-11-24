@@ -43,6 +43,68 @@ index 82117d1b3b..8fb959ef0f 100644
  
  config IPOD_TOUCH_2G
       bool
+diff --git a/hw/arm/cs42l65.c b/hw/arm/cs42l65.c
+index ddb717a02f..4d30712344 100644
+--- a/hw/arm/cs42l65.c
++++ b/hw/arm/cs42l65.c
+@@ -1,10 +1,11 @@
+ /*
+- * CS42L65 SPI register port, qualified against the original N42 driver.
++ * CS42L65 and CS42L81 SPI register ports.
+  *
+  * AppleARMSPIAudio's read/write methods (11A465, 809ee348/809ee3f8):
+  *   6d|6c, register>>8, register&7f | autoincrement<<7, length-1, data...
+  * AppleCS42L65Audio's identity probe (80b78d18) reads registers 1..3 and
+- * checks 42 a6 5x. Other registers currently retain writes. Clocking, analog
++ * checks 42 a6 5x. P101 AppleCS42L81Audio (10B329, 805d6894) checks
++ * 42 a8 1x with the same three-byte read. Other registers retain writes. Clocking, analog
+  * controls and interrupt/status side effects remain to be qualified; this
+  * register-port model does not claim a working codec or audio stream.
+  */
+@@ -15,11 +16,13 @@
+ #include "migration/vmstate.h"
+ 
+ #define TYPE_CS42L65 "cs42l65"
++#define TYPE_CS42L81 "cs42l81"
+ OBJECT_DECLARE_SIMPLE_TYPE(CS42L65State, CS42L65)
+ #define CS42L65_REGS 65536
+ 
+ struct CS42L65State {
+     SSIPeripheral parent_obj;
++    bool is_cs42l81;
+     uint8_t regs[CS42L65_REGS];
+     uint8_t command, header_pos, high;
+     bool autoincrement;
+@@ -79,8 +82,8 @@ static void cs42l65_reset(DeviceState *dev)
+     CS42L65State *s = CS42L65(dev);
+     memset(s->regs, 0, sizeof(s->regs));
+     s->regs[1] = 0x42;
+-    s->regs[2] = 0xa6;
+-    s->regs[3] = 0x50;
++    s->regs[2] = s->is_cs42l81 ? 0xa8 : 0xa6;
++    s->regs[3] = s->is_cs42l81 ? 0x10 : 0x50;
+     s->command = s->header_pos = s->high = 0;
+     s->autoincrement = false;
+     s->address = s->remaining = 0;
+@@ -122,8 +125,18 @@ static const TypeInfo cs42l65_info = {
+     .instance_size = sizeof(CS42L65State),
+     .class_init = cs42l65_class_init,
+ };
++static void cs42l81_init(Object *obj)
++{
++    CS42L65(obj)->is_cs42l81 = true;
++}
++static const TypeInfo cs42l81_info = {
++    .name = TYPE_CS42L81,
++    .parent = TYPE_CS42L65,
++    .instance_init = cs42l81_init,
++};
+ static void cs42l65_register_types(void)
+ {
+     type_register_static(&cs42l65_info);
++    type_register_static(&cs42l81_info);
+ }
+ type_init(cs42l65_register_types)
 diff --git a/hw/arm/ipod_touch_1g.c b/hw/arm/ipod_touch_1g.c
 index 5ae7c8dd58..dcda20f045 100644
 --- a/hw/arm/ipod_touch_1g.c
@@ -375,6 +437,362 @@ index 3bfc3bdea4..5fa5c34dc8 100644
      /* Legacy page-store images omit all inline NAND encryption. A6's native
       * protected images retain their additional encrypted-file layer. */
      DEFINE_PROP_BOOL("nand-file-aes", S5L8930CDMAState, nand_file_aes, false),
+diff --git a/hw/arm/s5l8930_display.c b/hw/arm/s5l8930_display.c
+index 6601ab9756..bc7c4a7399 100644
+--- a/hw/arm/s5l8930_display.c
++++ b/hw/arm/s5l8930_display.c
+@@ -82,6 +82,7 @@ typedef struct {
+     /* Parameter FIFO parser: packet in progress + the swap it belongs to. */
+     uint32_t pkt_left;
+     uint32_t pkt_off;
++    uint16_t transaction_left; /* H5P counted FIFO words remaining */
+     uint32_t swap_id;
+     bool swap_pending;       /* a swap arrived since the last VBL */
+     uint32_t panel;          /* pipe0: w << 16 | h of a panel= override (issue #21), 0 = none */
+@@ -113,6 +114,7 @@ struct S5L8930DisplayState {
+     uint32_t pw, ph;         /* "panel-width"/"panel-height": panel= override (issue #21), 0 = the board's */
+     uint32_t refresh_hz;     /* "refresh-hz": the VBL's rate, 60 as on the devices */
+     bool h5p;
++    bool sleep_hint;
+ 
+     DisplayPipe pipe[2];     /* 0 = DisplayPipe0 (scanned out), 1 = RGBOUT */
+     uint32_t clcd[2][CLCD_WORDS];
+@@ -153,6 +155,7 @@ struct S5L8930DisplayState {
+      * Anything else (live layers before the first swap, a new surface, the panel going dark) draws.
+      */
+     uint8_t *front_next;     /* the relatch's scratch: kept only if it differs */
++    bool previous_front_valid; /* front_next still holds the preceding latch */
+     /*
+      * The layers' source rows the front was composed from (packed: the rows the panel shows), the
+      * layers they were read as, and src_next, the next latch's read. A quiet panel relatches every
+@@ -252,10 +255,17 @@ static void pipe_fifo_write(DisplayPipe *p, uint32_t val)
+      */
+     if ((val & 0x80000000) && p->pkt_left == 0) {
+         p->swap_id = val & 0xffff;
+-        p->swap_pending = true;
++        /* AppleH4GDisplayPipe includes every following packet header and
++         * data word in this count. A VBL may arrive between AP writes. */
++        p->transaction_left = p->h5p && (val & (1u << 29)) ?
++                              (val >> 16) & 0x7ff : 0;
++        p->swap_pending = !p->transaction_left;
+         return;
+     }
+     pipe_fifo_write_word(p, val);
++    if (p->transaction_left && --p->transaction_left == 0) {
++        p->swap_pending = true;
++    }
+ }
+ 
+ static void pipe_fifo_write_word(DisplayPipe *p, uint32_t val)
+@@ -319,8 +329,12 @@ static void pipe_frame_end(DisplayPipe *p)
+ {
+     uint32_t *r = p->regs;
+ 
+-    r[DP_SWAP_DONE / 4] = (r[DP_SWAP_DONE / 4] & ~0xffff) | p->swap_id;
+-    r[DP_IRQ_STATUS / 4] |= DP_IRQ_VBL | DP_IRQ_SWAP_DONE;
++    r[DP_IRQ_STATUS / 4] |= DP_IRQ_VBL;
++    if (p->swap_pending || !p->h5p) {
++        r[DP_SWAP_DONE / 4] = (r[DP_SWAP_DONE / 4] & ~0xffff) | p->swap_id;
++        r[DP_IRQ_STATUS / 4] |= DP_IRQ_SWAP_DONE;
++        p->swap_pending = false;
++    }
+     pipe_update_irq(p);
+ }
+ 
+@@ -418,11 +432,10 @@ static void vbl_tick(void *opaque)
+      * animation ever needs measuring. */
+     frame_timeline_record(&s->ftl, s->pipe[0].swap_id, new_frame);
+     if (s->pipe[0].swap_pending) {
+-        s->pipe[0].swap_pending = false;
+         s->quiet_vbls = 0;
+         s->swaps++;
+         front_latch(s);
+-    } else if (++s->quiet_vbls >= QUIET_RELATCH_VBLS) {
++    } else if (!s->pipe[0].transaction_left && ++s->quiet_vbls >= QUIET_RELATCH_VBLS) {
+         /*
+          * No swap for a quarter second, yet the buffer can still change:
+          * with Accessibility > Zoom on, CA stops swapping and the scaler
+@@ -432,7 +445,6 @@ static void vbl_tick(void *opaque)
+          */
+         front_latch(s);
+     }
+-    s->pipe[1].swap_pending = false;
+     pipe_frame_end(&s->pipe[0]);
+     pipe_frame_end(&s->pipe[1]);
+     /*
+@@ -628,9 +640,12 @@ static void display_invalidate(void *opaque)
+ static void panel_size(S5L8930DisplayState *s, unsigned *w, unsigned *h)
+ {
+     uint32_t v = panel_word(&s->pipe[0], DP_SIZE, s->pipe[0].regs[DP_SIZE / 4]);
++    /* H4G programs 12 bits per axis in DP_SIZE (10B329, 0x80910db2).
++     * Dropping bit 11 made a rotated 2048-wide surface fall back to portrait. */
++    unsigned mask = s->h5p ? 0xfff : 0x7ff;
+ 
+-    *w = (v >> 16) & 0x7ff;
+-    *h = v & 0x7ff;
++    *w = (v >> 16) & mask;
++    *h = v & mask;
+     if (!*w || !*h) {
+         *w = s->pw ? s->pw : s->width;
+         *h = s->pw ? s->ph : s->height;
+@@ -838,6 +853,17 @@ static bool layers(S5L8930DisplayState *s, unsigned w, unsigned h, UILayer u[2],
+     return on[0] || on[1] || video;
+ }
+ 
++bool s5l8930_display_active(DeviceState *dev)
++{
++    S5L8930DisplayState *s = S5L8930_DISPLAY(dev);
++    UILayer ui[2];
++    bool on[2];
++    unsigned w, h;
++
++    panel_size(s, &w, &h);
++    return layers(s, w, h, ui, on, NULL);
++}
++
+ /*
+  * The video layer (0x1038 bit 10; block at +0x3000): NV12 that the pipe scales and converts itself, as
+  * 4.x plays a movie (MPMoviePlayer: VXD decodes, the M2 scaler turns the frame upright, the pipe shows
+@@ -985,10 +1011,15 @@ static bool compose(S5L8930DisplayState *s, unsigned w, unsigned h, uint32_t *ou
+         return false;
+     }
+     if (out) {
+-        g_autofree uint32_t *base = g_new(uint32_t, (size_t)w * h);
+-        bool video = video_compose(s, w, h, base);
++        g_autofree uint32_t *base = NULL;
++        if (s->pipe[0].regs[DP_LAYERS / 4] & 0x400) {
++            base = g_new(uint32_t, (size_t)w * h);
++            if (!video_compose(s, w, h, base)) {
++                g_clear_pointer(&base, g_free);
++            }
++        }
+         layers_fetch(s, u, on);
+-        blend(u, on, s->src_next, w, h, out, video ? base : NULL);
++        blend(u, on, s->src_next, w, h, out, base);
+     }
+     return true;
+ }
+@@ -997,6 +1028,7 @@ static void front_latch(S5L8930DisplayState *s)
+     unsigned w, h;
+     size_t need;
+ 
++    s->previous_front_valid = false;
+     panel_size(s, &w, &h);
+     if (trace_event_get_state_backends(TRACE_S5L8930_DISPLAY_LOG)) {
+         static unsigned n;
+@@ -1019,17 +1051,25 @@ static void front_latch(S5L8930DisplayState *s)
+     UILayer u[2];
+     bool on[2];
+     bool valid = layers(s, w, h, u, on, key);
+-    size_t len = valid ? layers_fetch(s, u, on) : 0;
+-    g_autofree uint32_t *base = g_new(uint32_t, (size_t)w * h);
+-    bool video = valid && video_compose(s, w, h, base);
+-
+-    /* The front was composed from these very layers and bytes. */
+-    if (valid && !video && valid == s->front_valid && !memcmp(key, s->front_key, sizeof(key)) &&
+-        len == s->src_len && !memcmp(u, s->src_layers, sizeof(u)) &&
+-        !memcmp(s->src_next, s->src, len)) {
+-        return;
+-    }
+-    if (valid) {
++    const UILayer *only = &u[on[0] ? 0 : 1];
++    bool video_on = key[1] & 4;
++    if (s->h5p && !video_on && (on[0] != on[1]) && !only->regions &&
++        !only->fmt && !only->x0 && !only->y0 && only->x1 == w &&
++        only->y1 == h && only->sw == w) {
++        /* A full BGRA plane already has the panel's pixel format. Take the
++         * same VBL snapshot directly into the pending front buffer. */
++        layer_fetch(s, only, s->front_next);
++        s->src_len = 0;
++    } else if (valid) {
++        size_t len = layers_fetch(s, u, on);
++        g_autofree uint32_t *base = video_on ? g_new(uint32_t, (size_t)w * h) : NULL;
++        bool video = base && video_compose(s, w, h, base);
++
++        if (!video && s->front_valid && !memcmp(key, s->front_key, sizeof(key)) &&
++            len == s->src_len && !memcmp(u, s->src_layers, sizeof(u)) &&
++            !memcmp(s->src_next, s->src, len)) {
++            return;
++        }
+         uint8_t *t = s->src;
+         s->src = s->src_next;
+         s->src_next = t;
+@@ -1043,6 +1083,7 @@ static void front_latch(S5L8930DisplayState *s)
+         uint8_t *t = s->front;
+         s->front = s->front_next;
+         s->front_next = t;
++        s->previous_front_valid = valid && s->front_valid && key[0] == s->front_key[0];
+         memcpy(s->front_key, key, sizeof(key));
+         s->front_valid = valid;
+         s->front_gen++;
+@@ -1060,8 +1101,64 @@ static void gamma_row(const S5L8930DisplayState *s, const uint32_t *src, uint32_
+     }
+ }
+ 
+-/* ponytail: full redraw every host refresh (~30 Hz, 3 MiB), add dirty
+- * tracking via framebuffer_update_display if it shows up in profiles. */
++static void display_sleep_hint(DisplaySurface *surface, unsigned w, unsigned h)
++{
++    DisplaySurface *hint = qemu_create_placeholder_surface(
++        512, 384, "iPad asleep. Click to wake.");
++    pixman_transform_t transform;
++
++    pixman_transform_init_scale(&transform,
++        pixman_double_to_fixed(512.0 / w), pixman_double_to_fixed(384.0 / h));
++    pixman_image_set_transform(hint->image, &transform);
++    pixman_image_composite32(PIXMAN_OP_SRC, hint->image, NULL, surface->image,
++                             0, 0, 0, 0, 0, 0, w, h);
++    qemu_free_displaysurface(hint);
++}
++
++typedef struct PanelDamage {
++    unsigned left, top, right, bottom;
++} PanelDamage;
++
++/* Compare complete rows to find the vertical span. Within it, trim 32-pixel
++ * columns until each side touches at least one changed pixel. */
++static PanelDamage panel_damage(const uint32_t *old, const uint32_t *now,
++                                unsigned w, unsigned h)
++{
++    PanelDamage box = {0, 0, w, h};
++    while (box.top < h &&
++           !memcmp(old + box.top * w, now + box.top * w, w * 4)) {
++        box.top++;
++    }
++    while (box.bottom > box.top &&
++           !memcmp(old + (box.bottom - 1) * w, now + (box.bottom - 1) * w, w * 4)) {
++        box.bottom--;
++    }
++    if (box.top == box.bottom) {
++        return box;
++    }
++    unsigned left = w, right = 0;
++    for (unsigned y = box.top; y < box.bottom && (left || right < w); y++) {
++        const uint32_t *a = old + y * w, *b = now + y * w;
++        for (unsigned x = 0; x < left; x += 32) {
++            if (memcmp(a + x, b + x, MIN(32u, left - x) * 4)) {
++                left = x;
++                break;
++            }
++        }
++        for (unsigned x = w; x > right;) {
++            unsigned n = MIN(32u, x - right);
++            if (memcmp(a + x - n, b + x - n, n * 4)) {
++                right = x;
++                break;
++            }
++            x -= n;
++        }
++    }
++    box.left = left;
++    box.right = right;
++    return box;
++}
++
+ static void display_update(void *opaque)
+ {
+     S5L8930DisplayState *s = opaque;
+@@ -1073,6 +1170,7 @@ static void display_update(void *opaque)
+     bool lit;
+ 
+     panel_size(s, &w, &h);
++    PanelDamage box = {0, 0, w, h};
+     surface = qemu_console_surface(s->con);
+     if (surface_width(surface) != w || surface_height(surface) != h) {
+         qemu_console_resize(s->con, w, h);
+@@ -1097,6 +1195,10 @@ static void display_update(void *opaque)
+         if (s->shown == 1 && s->shown_gen == s->front_gen && s->shown_surface == surface) {
+             return;     /* the surface already holds this latched frame */
+         }
++        if (s->h5p && s->previous_front_valid && s->shown == 1 &&
++            s->shown_gen + 1 == s->front_gen && s->shown_surface == surface) {
++            box = panel_damage((const uint32_t *)s->front_next, img, w, h);
++        }
+         s->shown = 1;
+         s->shown_gen = s->front_gen;
+     } else if (lit) {
+@@ -1115,18 +1217,28 @@ static void display_update(void *opaque)
+         s->shown = 0;   /* live layers: drawn every refresh, as they may change without a swap */
+     }
+     s->shown_surface = surface;
+-    for (unsigned y = 0; y < h; y++) {
+-        uint8_t *d = surface_data(surface) + y * surface_stride(surface);
++    if (!img && s->sleep_hint) {
++        display_sleep_hint(surface, w, h);
++        dpy_gfx_update(s->con, 0, 0, w, h);
++        return;
++    }
++    unsigned width = box.right - box.left;
++    if (!width || box.top == box.bottom) {
++        return;
++    }
++    for (unsigned y = box.top; y < box.bottom; y++) {
++        uint8_t *d = surface_data(surface) + y * surface_stride(surface) + box.left * 4;
+ 
+         if (!img) {
+-            memset(d, 0, w * 4);
++            memset(d, 0, width * 4);
+         } else if (s->gamma_identity) {
+-            memcpy(d, img + (size_t)y * w, w * 4);
++            memcpy(d, img + (size_t)y * w + box.left, width * 4);
+         } else {
+-            gamma_row(s, img + (size_t)y * w, (uint32_t *)d, w);
++            gamma_row(s, img + (size_t)y * w + box.left, (uint32_t *)d, width);
+         }
+     }
+-    dpy_gfx_update(s->con, 0, 0, w, h);
++    trace_s5l8930_display_damage(box.left, box.top, width, box.bottom - box.top);
++    dpy_gfx_update(s->con, box.left, box.top, width, box.bottom - box.top);
+ }
+ 
+ static const GraphicHwOps display_gfx_ops = {
+@@ -1144,6 +1256,7 @@ static void s5l8930_display_reset(DeviceState *dev)
+     for (int i = 0; i < 2; i++) {
+         memset(s->pipe[i].regs, 0, sizeof(s->pipe[i].regs));
+         s->pipe[i].pkt_left = s->pipe[i].pkt_off = s->pipe[i].swap_id = 0;
++        s->pipe[i].transaction_left = 0;
+         s->pipe[i].swap_pending = false;
+     }
+     memset(s->clcd, 0, sizeof(s->clcd));
+@@ -1292,6 +1405,22 @@ static bool display_pipe_swap_needed(void *opaque)
+     return ((DisplayPipe *)opaque)->swap_pending;
+ }
+ 
++static bool display_pipe_transaction_needed(void *opaque)
++{
++    return ((DisplayPipe *)opaque)->transaction_left != 0;
++}
++
++static const VMStateDescription vmstate_display_pipe_transaction = {
++    .name = "s5l8930.display.pipe/transaction",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .needed = display_pipe_transaction_needed,
++    .fields = (const VMStateField[]) {
++        VMSTATE_UINT16(transaction_left, DisplayPipe),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
+ /* A swap in flight when the state was saved: its VBL still owes the latch.
+  * A subsection, so saves taken with nothing pending stay loadable by older
+  * builds. */
+@@ -1319,6 +1448,7 @@ static const VMStateDescription vmstate_display_pipe = {
+     },
+     .subsections = (const VMStateDescription * const []) {
+         &vmstate_display_pipe_swap,
++        &vmstate_display_pipe_transaction,
+         NULL
+     }
+ };
+@@ -1359,6 +1489,7 @@ static const VMStateDescription vmstate_s5l8930_display = {
+ 
+ static const Property s5l8930_display_properties[] = {
+     DEFINE_PROP_BOOL("h5p", S5L8930DisplayState, h5p, false),
++    DEFINE_PROP_BOOL("sleep-hint", S5L8930DisplayState, sleep_hint, false),
+     DEFINE_PROP_UINT64("fb-base", S5L8930DisplayState, fb_base, 0),
+     DEFINE_PROP_UINT16("width", S5L8930DisplayState, width, 1024),     /* K48 */
+     DEFINE_PROP_UINT16("height", S5L8930DisplayState, height, 768),
 diff --git a/hw/arm/s5l8930_iop.c b/hw/arm/s5l8930_iop.c
 index 91dc9d653e..5639411eb6 100644
 --- a/hw/arm/s5l8930_iop.c
@@ -412,11 +830,56 @@ index 91dc9d653e..5639411eb6 100644
      s->vm_state_entry = qemu_add_vm_change_state_handler(iop_vm_state, s);
  }
  
+diff --git a/hw/arm/s5l8940_isp.c b/hw/arm/s5l8940_isp.c
+index f94c7d9642..17c5cdc842 100644
+--- a/hw/arm/s5l8940_isp.c
++++ b/hw/arm/s5l8940_isp.c
+@@ -24,6 +24,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(H4ISPState, H4_ISP)
+ #define H4_SLOTS 8
+ #define H4_QUEUE_SIZE 0x6000
+ #define H4_BUFFERS 64
++#define H4_SENSOR_ID_BYTES 16
+ 
+ typedef struct H4Buffer {
+     uint8_t descriptor[40];
+@@ -591,6 +592,24 @@ static uint16_t h4_io_command(H4ISPState *s, uint16_t op, uint8_t *p,
+             return 1;
+         sensor->fps = lduw_le_p(p + 4);
+         return 0;
++    case 0x501: { /* Read the sensor's factory NVM. */
++        if (request < 12 || response < 12)
++            return 1;
++        uint32_t offset = value, length = ldl_le_p(p + 8);
++        /* The generated sensors expose an unprogrammed identification block. */
++        if (offset > H4_SENSOR_ID_BYTES || length > H4_SENSOR_ID_BYTES - offset ||
++            length > response - 12)
++            return 1;
++        memset(p + 12, 0, length);
++        return 0;
++    }
++    case 0x507: /* Lens shading metadata: no calibration table. */
++    case 0x508: /* Lens shading data: validity flag clear. */
++    case 0x701: /* Focus actuator limits: no physical motor. */
++        if (response < 8)
++            return 1;
++        memset(p + 4, 0, response - 4);
++        return 0;
+     case 0x204: /* Exposure bias and caller's frame acknowledgement token. */
+         if (request != 8 && request < 12)
+             return 1;
 diff --git a/hw/arm/s5l8950.c b/hw/arm/s5l8950.c
-index 547b8bd0af..33f0297901 100644
+index 547b8bd0af..0d09896c8e 100644
 --- a/hw/arm/s5l8950.c
 +++ b/hw/arm/s5l8950.c
-@@ -53,6 +53,7 @@
+@@ -21,6 +21,7 @@
+ #include "hw/core/qdev-properties.h"
+ #include "hw/arm/exynos4210.h"
+ #include "hw/arm/s5l8930.h"
++#include "hw/arm/s5l8955.h"
+ #include "hw/arm/ipod_touch_buttons.h"
+ #include "hw/arm/ipod_touch_mipi_dsi.h"
+ #include "hw/arm/ipod_touch_spi.h"
+@@ -53,6 +54,7 @@
  #include "trace.h"
  
  #define TYPE_S5L8950_MACHINE MACHINE_TYPE_NAME("iPhone-5")
@@ -424,7 +887,7 @@ index 547b8bd0af..33f0297901 100644
  OBJECT_DECLARE_SIMPLE_TYPE(S5L8950State, S5L8950_MACHINE)
  #define A6_RAM_BASE 0x80000000ULL
  #define A6_RAM_SIZE 0x40000000ULL
-@@ -102,6 +103,36 @@ static void a6_mouse_event(void *opaque, int x, int y, int z, int buttons)
+@@ -102,6 +104,36 @@ static void a6_mouse_event(void *opaque, int x, int y, int z, int buttons)
      }
  }
  
@@ -461,7 +924,20 @@ index 547b8bd0af..33f0297901 100644
  /* A5/A6 use the PA Semi command-FIFO I2C block, rather than A4's block.
   * Register/command definitions are cross-checked against Linux's
   * drivers/i2c/busses/i2c-pasemi-core.c and the original N42 driver traffic. */
-@@ -239,6 +270,7 @@ struct S5L8950State {
+@@ -232,18 +264,27 @@ struct S5L8950State {
+     uint32_t ae2_regs[0x2000 / 4];
+     DeviceState *gpio;
+     DeviceState *pmu;
++    DeviceState *display;
+     QEMUTimer *ap_off_timer;
++    QEMUTimer *home_release_timer;
++    QEMUTimer *boot_wake_timer;
++    int64_t home_release_at;
++    int64_t boot_wake_deadline;
++    int64_t boot_dark_since;
+     bool resume_boot;
+     bool button_down[IPOD_TOUCH_BUTTON_VOLDOWN + 1];
+     char *kboot, *nand, *restore_image;
      char *usb_tcp_addr; /* the host USB bridge (usbmuxd-qemu); unset: IT_USB_TCP */
      int restore_fd;
      uint64_t restore_size;
@@ -469,7 +945,14 @@ index 547b8bd0af..33f0297901 100644
      bool ppn, display_probe, ae2_probe, pmu_adc_probe, tristar_probe,
          usb_host_probe;
      bool audio_ports_probe;
-@@ -262,6 +294,8 @@ struct S5L8950State {
+     bool camera;
+     bool quiet_boot; /* omit -v in the RAM boot handoff */
++    bool wake_on_boot;
++    bool wake_click;
+     bool battery_probe;
+     bool backlight_probe;
+     bool hsic_ready_probe;
+@@ -262,12 +303,64 @@ struct S5L8950State {
      unsigned unimplemented, unimplemented_iop;
      QemuConsole *console;
      uint32_t framebuffer;
@@ -478,7 +961,63 @@ index 547b8bd0af..33f0297901 100644
      GuestPackage pkg;
      GuestPasteboard pb;
      IPodAgent *agent;
-@@ -324,6 +358,21 @@ static void a6_wlan_reset(void *opaque, int pin, int level)
+     uint64_t powerdown_sequence;
+ };
+ 
++static void p101_release_home(void *opaque)
++{
++    s5l8950_press_button(IPOD_TOUCH_BUTTON_HOME, false);
++}
++
++static void p101_tap_home(void)
++{
++    s5l8950_press_button(IPOD_TOUCH_BUTTON_HOME, true);
++    s5l8950_press_button(IPOD_TOUCH_BUTTON_HOME, false);
++}
++
++static void p101_boot_wake(void *opaque)
++{
++    S5L8950State *s = opaque;
++    int64_t now = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
++
++    if (now >= s->boot_wake_deadline) {
++        return;
++    }
++    if (s5l8930_display_active(s->display)) {
++        s->boot_dark_since = -1;
++    } else if (s->boot_dark_since < 0) {
++        s->boot_dark_since = now;
++    } else if (now - s->boot_dark_since >= 750) {
++        /* Let the native panel shutdown finish before waking it once. */
++        p101_tap_home();
++        return;
++    }
++    timer_mod(s->boot_wake_timer, now + 250);
++}
++
++static void p101_mouse_event(void *opaque, int x, int y, int z, int buttons)
++{
++    IPodTouchMultitouchState *mt = opaque;
++    S5L8950State *s = S5L8950_MACHINE(qdev_get_machine());
++
++    if (s->wake_click) {
++        s->wake_click = buttons != 0;
++        return;
++    }
++    if (buttons && !mt->touch_down && s->boot_wake_timer &&
++        !s5l8930_display_active(s->display)) {
++        /* Consume the wake click so it cannot also hit the lock screen. */
++        s->wake_click = true;
++        p101_tap_home();
++        return;
++    }
++    a6_mouse_event(opaque, x, y, z, buttons);
++}
++
+ /* Native N42 DT handshake: HOST_READY GPIO2.1 /6.6, DEVICE_READY GPIO26.3
+  * /7.1, EHCI ports2/4. An attached HSIC peer acknowledges host readiness;
+  * an absent peer cannot assert DEVICE_READY. Wire both handshake levels
+@@ -324,6 +417,21 @@ static void a6_wlan_reset(void *opaque, int pin, int level)
   * Graphics uses the common host executor and request validation. The optional
   * factory-imaging transport supplies one read-only stream only when explicitly
   * configured; its writes use the guest's native block/FTL drivers. */
@@ -500,7 +1039,7 @@ index 547b8bd0af..33f0297901 100644
  static void a6_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
                           uint64_t value)
  {
-@@ -362,7 +411,7 @@ static void a6_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
+@@ -362,7 +470,7 @@ static void a6_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
          if (n && n <= 65536 && off <= s->restore_size &&
              n <= s->restore_size - off) {
              g_autofree uint8_t *buffer = g_malloc(n);
@@ -509,7 +1048,7 @@ index 547b8bd0af..33f0297901 100644
              if (count >= 0 && !guest_copy(cpu, q.args.ag.buffer_guest_ptr,
                                            buffer, count, true)) {
                  q.retval = count;
-@@ -395,12 +444,18 @@ static void a6_display_update(void *opaque)
+@@ -395,12 +503,18 @@ static void a6_display_update(void *opaque)
      if (!s->framebuffer)
          return;
      DisplaySurface *surface = qemu_console_surface(s->console);
@@ -531,7 +1070,84 @@ index 547b8bd0af..33f0297901 100644
  }
  static const GraphicHwOps a6_display_ops = {.gfx_update = a6_display_update};
  
-@@ -1331,8 +1386,9 @@ static void a6_reset(void *opaque)
+@@ -1308,6 +1422,55 @@ static void a6_dt_identity(uint8_t *image, size_t length, uint32_t load,
+                            sizeof(a6_n42_product_id)});
+ }
+ 
++static bool p101_prepare_display(uint8_t *image, size_t length, uint32_t load,
++                                 uint32_t arguments, unsigned w, unsigned h)
++{
++    uint32_t scale = w == P101_PANEL_WIDTH ? 2 : 1;
++    uint32_t scale_le = cpu_to_le32(scale);
++    uint32_t ppi_le = cpu_to_le32(132 * scale);
++    size_t offset = (uint32_t)(arguments - load);
++
++    if (arguments < load || offset > length || length - offset < 0x38) {
++        return false;
++    }
++    uint8_t *video = image + offset + 0x1c;
++    stl_le_p(video, w * 4);
++    stl_le_p(video + 4, w);
++    stl_le_p(video + 8, h);
++    stl_le_p(video + 12, 32 | ((scale - 1) << 16));
++    a4_dt_edit(image, length, load, arguments,
++               &(A4DTEdit){"chosen", "display-scale", &scale_le, sizeof(scale_le)});
++    a4_dt_edit(image, length, load, arguments,
++               &(A4DTEdit){"clcd", "dot-pitch", &ppi_le, sizeof(ppi_le)});
++    return true;
++}
++
++/* Prepared boot images store the centered Apple logo in complete framebuffer
++ * rows. Preserve its size in points when the requested panel geometry changes. */
++static bool p101_splash_row(uint32_t *dst, unsigned w, unsigned h, unsigned y,
++                            const uint8_t *src, unsigned sw, unsigned sh,
++                            unsigned first_row, unsigned rows)
++{
++    unsigned old_scale = MAX(sw, sh) / 1024, scale = h / 1024;
++    int sy = (int)(y * old_scale / scale) +
++             ((int)sh - (int)(h * old_scale / scale)) / 2;
++    int x0 = ((int)sw - (int)(w * old_scale / scale)) / 2;
++
++    if (sy < (int)first_row || sy - first_row >= rows) {
++        return false;
++    }
++    src += (sy - first_row) * sw * 4;
++    for (unsigned x = 0; x < w; x++) {
++        int sx = (int)(x * old_scale / scale) + x0;
++        if (sx >= 0 && sx < (int)sw) {
++            memcpy(&dst[x], src + sx * 4, 4);
++        } else {
++            dst[x] = 0;
++        }
++    }
++    return true;
++}
++
+ static void a6_reset(void *opaque)
+ {
+     S5L8950State *s = opaque;
+@@ -1317,6 +1480,20 @@ static void a6_reset(void *opaque)
+     if (resume && a6_resume(s)) {
+         return;
+     }
++    if (s->home_release_timer) {
++        timer_del(s->home_release_timer);
++        s->home_release_at = 0;
++        s->wake_click = false;
++        s5l8950_press_button(IPOD_TOUCH_BUTTON_HOME, false);
++    }
++    if (s->boot_wake_timer) {
++        int64_t now = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
++
++        /* The boot logo uses the same scanout until the guest takes over. */
++        s->boot_dark_since = -1;
++        s->boot_wake_deadline = now + 120000;
++        timer_mod(s->boot_wake_timer, now + 30000);
++    }
+     g_autofree char *data = NULL;
+     gsize size;
+     GError *error = NULL;
+@@ -1331,8 +1508,9 @@ static void a6_reset(void *opaque)
      uint32_t arguments = ldl_le_p(trailer + 16),
               length = ldl_le_p(trailer + 20);
      if (length > size - 24 || load < A6_RAM_BASE ||
@@ -543,7 +1159,32 @@ index 547b8bd0af..33f0297901 100644
          exit(1);
      }
      if (s->quiet_boot &&
-@@ -1356,7 +1412,9 @@ static void a6_reset(void *opaque)
+@@ -1340,6 +1518,24 @@ static void a6_reset(void *opaque)
+         error_report("quiet-boot: invalid ARM32 boot command line");
+         exit(1);
+     }
++    unsigned splash_w = 0, splash_h = 0;
++    if (s->p101 && (uint64_t)arguments + 0x38 <= (uint64_t)load + length) {
++        const uint8_t *args = (uint8_t *)data + (arguments - load);
++        unsigned w = ldl_le_p(args + 0x20), h = ldl_le_p(args + 0x24);
++        if (((w == 2048 && h == 1536) || (w == 1536 && h == 2048) ||
++             (w == 1024 && h == 768) || (w == 768 && h == 1024)) &&
++            ldl_le_p(args + 0x1c) == w * 4 &&
++            (ldl_le_p(args + 0x28) & 0xff) == 32 &&
++            (w != s->panel_width || h != s->panel_height)) {
++            splash_w = w;
++            splash_h = h;
++        }
++    }
++    if (s->p101 && !p101_prepare_display((uint8_t *)data, length, load, arguments,
++                                         s->panel_width, s->panel_height)) {
++        error_report("iPad boot arguments are missing the framebuffer geometry");
++        exit(1);
++    }
+     /* iBoot supplies fresh entropy in the IPSW DT's reserved random-seed
+      * slot. XNU rejects an all-zero seed; regenerate it on every reset,
+      * without storing host entropy in the prepared firmware artifact. */
+@@ -1356,12 +1552,15 @@ static void a6_reset(void *opaque)
          a4_dt_edit((uint8_t *)data, length, load, arguments,
                     &(A4DTEdit){"isp", "compatible", "none", 5});
      }
@@ -554,7 +1195,53 @@ index 547b8bd0af..33f0297901 100644
      a6_reset_soc(s);
      guest_pkg_reset(&s->pkg);
      ipod_agent_reset(s->agent);
-@@ -1392,8 +1450,8 @@ static void a6_reset(void *opaque)
+     address_space_write(&address_space_memory, load, MEMTXATTRS_UNSPECIFIED,
+                         data, length);
++    s->framebuffer = ldl_le_p((uint8_t *)data + (arguments - load) + 0x14);
+     for (gsize off = length; off + 20 <= size - 24;) {
+         const uint8_t *seg = (const uint8_t *)data + off;
+         uint32_t pa = ldl_le_p(seg + 8), bytes = ldl_le_p(seg + 12);
+@@ -1373,6 +1572,31 @@ static void a6_reset(void *opaque)
+             error_report("iPhone-5: invalid auxiliary RAM segment");
+             exit(1);
+         }
++        unsigned w = s->panel_width, h = s->panel_height;
++        uint32_t fb = s->framebuffer;
++        if (splash_w && fb >= A6_RAM_BASE &&
++            (uint64_t)fb + w * h * 4 <= A6_RAM_BASE + A6_RAM_SIZE &&
++            pa >= fb && (pa - fb) % (splash_w * 4) == 0 &&
++            bytes % (splash_w * 4) == 0 &&
++            (uint64_t)(pa - fb) + bytes <= splash_w * splash_h * 4) {
++            if (zero && pa == fb && bytes == splash_w * splash_h * 4) {
++                address_space_set(&address_space_memory, fb, 0, w * h * 4,
++                                  MEMTXATTRS_UNSPECIFIED);
++                continue;
++            }
++            if (!zero) {
++                g_autofree uint32_t *row = g_new(uint32_t, w);
++                for (unsigned y = 0; y < h; y++) {
++                    if (p101_splash_row(row, w, h, y, seg + 20,
++                                        splash_w, splash_h, (pa - fb) / (splash_w * 4),
++                                        bytes / (splash_w * 4))) {
++                        address_space_write(&address_space_memory, fb + y * w * 4,
++                                            MEMTXATTRS_UNSPECIFIED, row, w * 4);
++                    }
++                }
++                continue;
++            }
++        }
+         if (zero)
+             address_space_set(&address_space_memory, pa, 0, bytes,
+                               MEMTXATTRS_UNSPECIFIED);
+@@ -1380,7 +1604,6 @@ static void a6_reset(void *opaque)
+             address_space_write(&address_space_memory, pa,
+                                 MEMTXATTRS_UNSPECIFIED, seg + 20, bytes);
+     }
+-    s->framebuffer = ldl_le_p((uint8_t *)data + arguments - load + 0x14);
+     for (int i = 0; i < 2; i++) {
+         cpu_reset(CPU(s->cpu[i]));
+         s->cpu[i]->env.cp15.c14_timer[GTIMER_VIRT].cval = UINT64_MAX;
+@@ -1392,8 +1615,8 @@ static void a6_reset(void *opaque)
      cpu_set_pc(CPU(s->cpu[0]), entry);
      fprintf(
          stderr,
@@ -565,7 +1252,7 @@ index 547b8bd0af..33f0297901 100644
  }
  
  /* Use the existing native launchd halt RPC. The request itself is not proof
-@@ -1486,7 +1544,7 @@ static void a6_init(MachineState *machine)
+@@ -1486,7 +1709,7 @@ static void a6_init(MachineState *machine)
      gles_host_set_a6(true);
      if (s->restore_image) {
          struct stat st;
@@ -574,7 +1261,7 @@ index 547b8bd0af..33f0297901 100644
          if (s->restore_fd < 0 || fstat(s->restore_fd, &st) ||
              !S_ISREG(st.st_mode)) {
              error_report("Cannot open regular restore-image file");
-@@ -1495,7 +1553,8 @@ static void a6_init(MachineState *machine)
+@@ -1495,7 +1718,8 @@ static void a6_init(MachineState *machine)
          s->restore_size = st.st_size;
      }
      if (!s->kboot) {
@@ -584,7 +1271,7 @@ index 547b8bd0af..33f0297901 100644
          exit(1);
      }
      memory_region_init_ram(&s->ram, NULL, "a6.dram", A6_RAM_SIZE, &error_fatal);
-@@ -1536,25 +1595,33 @@ static void a6_init(MachineState *machine)
+@@ -1536,39 +1760,49 @@ static void a6_init(MachineState *machine)
      sysbus_mmio_map(SYS_BUS_DEVICE(gpio), 0, 0x3fa00000);
      sysbus_connect_irq(SYS_BUS_DEVICE(gpio), 0,
                         qemu_allocate_irq(a6_irq, s, 119));
@@ -611,6 +1298,8 @@ index 547b8bd0af..33f0297901 100644
 +        s->touch_profile = mt_profile_k48;
 +        s->touch_profile.bcd_version = 0x160;
 +        mt->profile = &s->touch_profile;
++        s->home_release_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
++                                             p101_release_home, s);
 +        qemu_input_handler_register(gpio, &p101_key_handler);
 +    } else {
 +        mt->profile = &a6_mt_profile;
@@ -620,15 +1309,36 @@ index 547b8bd0af..33f0297901 100644
 -                                qdev_get_gpio_in(gpio, 201));
 -    qemu_add_mouse_event_handler(a6_mouse_event, mt, 1, "iPhone 5 Touchscreen");
 +                                qdev_get_gpio_in(gpio, s->p101 ? 203 : 201));
-+    qemu_add_mouse_event_handler(a6_mouse_event,
++    qemu_add_mouse_event_handler(s->p101 ? p101_mouse_event : a6_mouse_event,
 +                                 mt, 1, s->p101 ? "iPad 4 Touchscreen" : "iPhone 5 Touchscreen");
      ipod_touch_multitouch_register_input(mt);
--    if (s->audio_ports_probe) {
-+    if (s->audio_ports_probe && !s->p101) {
-         /* Original N42 DT: SPI3 uses the same spi-1,samsung controller
-          * already used for touch. Its codec register-port protocol is
-          * qualified separately in the CS42L65 model. */
-@@ -1599,15 +1666,23 @@ static void a6_init(MachineState *machine)
+     if (s->audio_ports_probe) {
+-        /* Original N42 DT: SPI3 uses the same spi-1,samsung controller
+-         * already used for touch. Its codec register-port protocol is
+-         * qualified separately in the CS42L65 model. */
++        /* The P101 codec is on SPI1; N42 uses SPI3. */
++        unsigned codec_bus = s->p101 ? 1 : 3;
+         DeviceState *spi = qdev_new(TYPE_IPOD_TOUCH_SPI);
+-        qdev_prop_set_uint8(spi, "index", 3);
+-        qdev_prop_set_string(spi, "peripheral", "cs42l65");
++        qdev_prop_set_uint8(spi, "index", codec_bus);
++        qdev_prop_set_string(spi, "peripheral", s->p101 ? "cs42l81" : "cs42l65");
+         qdev_prop_set_uint32(spi, "trace-transfer-limit", 512);
+         sysbus_realize_and_unref(SYS_BUS_DEVICE(spi), &error_fatal);
+-        sysbus_mmio_map(SYS_BUS_DEVICE(spi), 0, 0x32300000);
++        sysbus_mmio_map(SYS_BUS_DEVICE(spi), 0, 0x32000000 + codec_bus * 0x100000);
+         sysbus_connect_irq(SYS_BUS_DEVICE(spi), 0,
+-                           qemu_allocate_irq(a6_irq, s, 31));
++                           qemu_allocate_irq(a6_irq, s, 28 + codec_bus));
+         /* Native i2s-1,samsung ports. Reuse the existing PCM/rate model;
+          * codec LRCLK and A6 clock-source routing need qualification. */
+-        for (int i = 0; i < 3; i++) {
++        unsigned i2s_ports = s->p101 ? 2 : 3;
++        for (unsigned i = 0; i < i2s_ports; i++) {
+             DeviceState *port = qdev_new(TYPE_S5L8930_I2S);
+             qdev_prop_set_bit(port, "audio-out", i == 0);
+             qdev_prop_set_uint8(port, "port", i);
+@@ -1599,23 +1833,34 @@ static void a6_init(MachineState *machine)
          sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                             qemu_allocate_irq(a6_irq, s, 18 + i));
      }
@@ -660,7 +1370,21 @@ index 547b8bd0af..33f0297901 100644
      if (s->backlight_probe) {
          I2CSlave *backlight = i2c_slave_new("a6.backlight-registers", 0x63);
          i2c_slave_realize_and_unref(backlight, s->i2c[0]->bus, &error_fatal);
-@@ -1659,7 +1734,7 @@ static void a6_init(MachineState *machine)
+     }
+     if (s->audio_ports_probe) {
+-        I2CSlave *amp = i2c_slave_new("cs35l19", 0x40);
+-        qdev_prop_set_bit(DEVICE(amp), "trace-regs", true);
+-        i2c_slave_realize_and_unref(amp, s->i2c[0]->bus, &error_fatal);
++        unsigned speakers = s->p101 ? 2 : 1;
++        for (unsigned i = 0; i < speakers; i++) {
++            I2CSlave *amp = i2c_slave_new("cs35l19", 0x40 + i);
++            qdev_prop_set_bit(DEVICE(amp), "trace-regs", true);
++            i2c_slave_realize_and_unref(amp, s->i2c[0]->bus, &error_fatal);
++        }
+     }
+     if (s->tristar_probe) {
+         /* Original N42 DT: i2c0/tristar reg=0x1a. */
+@@ -1659,7 +1904,7 @@ static void a6_init(MachineState *machine)
          sysbus_connect_irq(SYS_BUS_DEVICE(host), 0,
                             qemu_allocate_irq(a6_irq, s, 12));
          qemu_add_machine_init_done_notifier(&a6_remote_wake_notifier);
@@ -669,7 +1393,7 @@ index 547b8bd0af..33f0297901 100644
              s5l8930_gpio_set_rest_level(gpio, 211, false);
              s5l8930_gpio_set_rest_level(gpio, 57, false);
              qdev_connect_gpio_out(gpio, 17,
-@@ -1669,7 +1744,7 @@ static void a6_init(MachineState *machine)
+@@ -1669,7 +1914,7 @@ static void a6_init(MachineState *machine)
              qdev_connect_gpio_out_named(s->pmu, "gpio", 10,
                                          qemu_allocate_irq(a6_wlan_reset, s, 0));
          }
@@ -678,7 +1402,7 @@ index 547b8bd0af..33f0297901 100644
              DeviceState *bb = qdev_new(TYPE_IOS_BASEBAND);
              USBDevice *modem = USB_DEVICE(qdev_new("usb-mdm9x15"));
  
-@@ -1726,7 +1801,7 @@ static void a6_init(MachineState *machine)
+@@ -1726,7 +1971,7 @@ static void a6_init(MachineState *machine)
              sysbus_connect_irq(SYS_BUS_DEVICE(modem_uart), 0,
                                 qemu_allocate_irq(a6_irq, s, 0x16));
          }
@@ -687,7 +1411,7 @@ index 547b8bd0af..33f0297901 100644
              host = qdev_new(TYPE_SYSBUS_OHCI);
              qdev_prop_set_uint32(host, "num-ports", 1);
              sysbus_realize_and_unref(SYS_BUS_DEVICE(host), &error_fatal);
-@@ -1773,6 +1848,12 @@ static void a6_init(MachineState *machine)
+@@ -1773,6 +2018,12 @@ static void a6_init(MachineState *machine)
      qdev_prop_set_uint32(cdma, "num-channels", A6_CDMA_CHANNELS);
      qdev_prop_set_uint8(cdma, "version", 5);
      qdev_prop_set_bit(cdma, "nand-file-aes", true);
@@ -700,9 +1424,16 @@ index 547b8bd0af..33f0297901 100644
      if (s->audio_ports_probe) {
          qdev_prop_set_uint32(cdma, "paced-base", 0x34190000);
          qdev_prop_set_uint32(cdma, "paced-ports", 8);
-@@ -1866,9 +1947,9 @@ static void a6_init(MachineState *machine)
+@@ -1865,10 +2116,16 @@ static void a6_init(MachineState *machine)
+          * blocks while qualifying the additional H5P register/IRQ contract.
           * It is not yet a claim of complete A6 display hardware support. */
          DeviceState *display = qdev_new(TYPE_S5L8930_DISPLAY);
++        s->display = display;
++        if (s->wake_on_boot) {
++            qdev_prop_set_bit(display, "sleep-hint", true);
++            s->boot_wake_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
++                                              p101_boot_wake, s);
++        }
          qdev_prop_set_bit(display, "h5p", true);
 -        qdev_prop_set_uint64(display, "fb-base", 0xbf700000);
 -        qdev_prop_set_uint16(display, "width", 640);
@@ -713,7 +1444,7 @@ index 547b8bd0af..33f0297901 100644
          sysbus_realize_and_unref(SYS_BUS_DEVICE(display), &error_fatal);
          sysbus_mmio_map(SYS_BUS_DEVICE(display), 0, 0x3a100000);
          sysbus_mmio_map(SYS_BUS_DEVICE(display), 1, 0x39200000);
-@@ -1889,15 +1970,25 @@ static void a6_init(MachineState *machine)
+@@ -1889,15 +2146,29 @@ static void a6_init(MachineState *machine)
           * 0x39500000, IRQ 41. The native AppleSamsungMIPIDSIController uses
           * the shared STATUS/CLKCTRL/PKTHDR register contract. The second
           * DT window (0x3f110000) is the separate, unmodeled SAC block. */
@@ -727,8 +1458,12 @@ index 547b8bd0af..33f0297901 100644
 -        sysbus_connect_irq(SYS_BUS_DEVICE(dsi), 0,
 -                           qemu_allocate_irq(a6_irq, s, 41));
 +        if (s->p101) {
-+            sysbus_create_simple("s5l8955.edp", 0x39500000,
-+                                  qemu_allocate_irq(a6_irq, s, 144));
++            DeviceState *edp = qdev_new("s5l8955.edp");
++            qdev_prop_set_uint16(edp, "width", s->panel_width);
++            qdev_prop_set_uint16(edp, "height", s->panel_height);
++            sysbus_realize_and_unref(SYS_BUS_DEVICE(edp), &error_fatal);
++            sysbus_mmio_map(SYS_BUS_DEVICE(edp), 0, 0x39500000);
++            sysbus_connect_irq(SYS_BUS_DEVICE(edp), 0, qemu_allocate_irq(a6_irq, s, 144));
 +        } else {
 +            DeviceState *dsi = qdev_new(TYPE_IPOD_TOUCH_MIPI_DSI);
 +            IPOD_TOUCH_MIPI_DSI(dsi)->hs_clock_at_reset = true;
@@ -748,7 +1483,7 @@ index 547b8bd0af..33f0297901 100644
          /* Original N42 scaler/dart-nrt compatibility includes the shared
           * Samsung M2 and S5L8930 DART interfaces. Mapper-scaler uses SIDs 2/3;
           * the existing scaler model consumes SID 2. Its reported 0x20007 is
-@@ -1927,9 +2018,6 @@ static void a6_init(MachineState *machine)
+@@ -1927,9 +2198,6 @@ static void a6_init(MachineState *machine)
              ipod_scaler_set_iommu(scaler, a6_scaler_xlate, dart, 2);
              ipod_scaler_set_version(scaler, 0x20007);
          }
@@ -758,7 +1493,7 @@ index 547b8bd0af..33f0297901 100644
      }
      qemu_register_reset(a6_reset, s);
      qemu_register_powerdown_notifier(&a6_powerdown_notifier);
-@@ -2117,16 +2205,18 @@ static char *a6_get_timer_status(Object *obj, Error **errp)
+@@ -2117,16 +2385,36 @@ static char *a6_get_timer_status(Object *obj, Error **errp)
   * separate from these awake GPIO pads. */
  void s5l8950_press_button(IPodTouchButton button, bool down)
  {
@@ -774,19 +1509,52 @@ index 547b8bd0af..33f0297901 100644
      }
 +    const unsigned *pins = s->p101 ? p101_pins : n42_pins;
      bool was_down = s->button_down[button];
++    if (s->p101 && button == IPOD_TOUCH_BUTTON_HOME) {
++        int64_t now = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
++
++        if (down) {
++            timer_del(s->home_release_timer);
++            if (!was_down) {
++                /* Give the native GPIO debounce time to recognize a tap. */
++                s->home_release_at = now + 150;
++            }
++        } else if (was_down && now < s->home_release_at) {
++            timer_mod(s->home_release_timer, s->home_release_at);
++            return;
++        }
++    }
++    if (s->boot_wake_timer && down && !was_down &&
++        (button == IPOD_TOUCH_BUTTON_HOME || button == IPOD_TOUCH_BUTTON_POWER)) {
++        timer_del(s->boot_wake_timer);
++    }
      s->button_down[button] = down;
 -    if (down && !was_down && s->pmu &&
 +    if (!s->p101 && down && !was_down && s->pmu &&
          (button == IPOD_TOUCH_BUTTON_HOME ||
           button == IPOD_TOUCH_BUTTON_POWER)) {
          a6_pmu_button(s->pmu, button == IPOD_TOUCH_BUTTON_POWER);
-@@ -2243,22 +2333,25 @@ static void a6_set_quiet_boot(Object *obj, bool value, Error **errp)
+@@ -2240,25 +2528,40 @@ static void a6_set_quiet_boot(Object *obj, bool value, Error **errp)
+     S5L8950_MACHINE(obj)->quiet_boot = value;
+ }
+ 
++static bool p101_get_wake_on_boot(Object *obj, Error **errp)
++{
++    return S5L8950_MACHINE(obj)->wake_on_boot;
++}
++
++static void p101_set_wake_on_boot(Object *obj, bool value, Error **errp)
++{
++    S5L8950_MACHINE(obj)->wake_on_boot = value;
++}
++
  static void a6_instance_init(Object *obj)
  {
      S5L8950State *s = S5L8950_MACHINE(obj);
 +    s->p101 = object_dynamic_cast(obj, TYPE_P101_MACHINE) != NULL;
-+    s->panel_width = s->p101 ? 2048 : 640;
-+    s->panel_height = s->p101 ? 1536 : 1136;
++    /* The iPad's native screen is portrait. UIKit uses these dimensions
++     * before laying out or rotating apps such as Photo Booth. */
++    s->panel_width = s->p101 ? P101_PANEL_WIDTH : 640;
++    s->panel_height = s->p101 ? P101_PANEL_HEIGHT : 1136;
      object_property_add_bool(obj, "quiet-boot", a6_get_quiet_boot,
                               a6_set_quiet_boot);
      /* These switches originally gated hardware bring-up. The normal device
@@ -816,14 +1584,56 @@ index 547b8bd0af..33f0297901 100644
      S5L8950_MACHINE(obj)->agent = ipod_agent_new();
      ipod_agent_publish(S5L8950_MACHINE(obj)->agent);
      object_property_add_str(obj, "agent-request", NULL, a6_set_agent_request);
-@@ -2282,6 +2375,22 @@ static const TypeInfo a6_machine = {
+@@ -2268,9 +2571,13 @@ static void a6_instance_init(Object *obj)
+ }
+ static void a6_instance_finalize(Object *obj)
+ {
++    S5L8950State *s = S5L8950_MACHINE(obj);
++
+     ipod_agent_publish(NULL);
+-    ipod_agent_free(S5L8950_MACHINE(obj)->agent);
+-    timer_free(S5L8950_MACHINE(obj)->ap_off_timer);
++    ipod_agent_free(s->agent);
++    timer_free(s->ap_off_timer);
++    timer_free(s->home_release_timer);
++    timer_free(s->boot_wake_timer);
+ }
+ 
+ static const TypeInfo a6_machine = {
+@@ -2282,6 +2589,48 @@ static const TypeInfo a6_machine = {
      .instance_init = a6_instance_init,
      .instance_finalize = a6_instance_finalize,
  };
 +
++static bool p101_get_retina(Object *obj, Error **errp)
++{
++    return S5L8950_MACHINE(obj)->panel_width == P101_PANEL_WIDTH;
++}
++
++static void p101_set_retina(Object *obj, bool enabled, Error **errp)
++{
++    S5L8950State *s = S5L8950_MACHINE(obj);
++    unsigned divisor = enabled ? 1 : 2;
++
++    if (s->cpu[0]) {
++        error_setg(errp, "retina must be selected before the virtual iPad starts");
++        return;
++    }
++    s->panel_width = P101_PANEL_WIDTH / divisor;
++    s->panel_height = P101_PANEL_HEIGHT / divisor;
++}
++
 +static void p101_class_init(ObjectClass *klass, const void *data)
 +{
 +    MachineClass *mc = MACHINE_CLASS(klass);
++
++    object_class_property_add_bool(klass, "retina", p101_get_retina, p101_set_retina);
++    object_class_property_set_description(klass, "retina",
++        "Render the iPad display at two pixels per point (default on)");
++    object_class_property_add_bool(klass, "wake-on-boot", p101_get_wake_on_boot,
++                                   p101_set_wake_on_boot);
++    object_class_property_set_description(klass, "wake-on-boot",
++        "Wake the iPad once during startup and show a hint when it sleeps");
 +
 +    /* QEMU initializes a separate compat property array for each machine type. */
 +    compat_props_add(mc->compat_props, a6_device_defaults,
@@ -839,7 +1649,7 @@ index 547b8bd0af..33f0297901 100644
  /* D1972 register interface with an opt-in ADC experiment. The original N42
   * driver starts conversions with register 48 bit 5 and consumes the completion
   * at event register 2 bit 5 (80bdc86c..c8de). Its result unpacking at
-@@ -2294,6 +2403,7 @@ typedef struct A6PMU {
+@@ -2294,6 +2643,7 @@ typedef struct A6PMU {
      uint8_t regs[256], reg;
      unsigned log_count;
      bool address;
@@ -847,7 +1657,76 @@ index 547b8bd0af..33f0297901 100644
      bool adc_probe;
      bool thermal_sensors;
      bool battery_swi;
-@@ -2414,12 +2524,12 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
+@@ -2317,10 +2667,12 @@ static void a6_pmu_set_ap_power(A6PMU *s, bool on)
+ static void a6_pmu_irq_update(A6PMU *s)
+ {
+     bool pending = false;
+-    for (unsigned i = 0; i < 9; i++) {
+-        pending |= s->regs[1 + i] & ~s->regs[0x12 + i];
++    unsigned mask = s->d2018 ? 0x15 : 0x12;
++    unsigned events = s->d2018 ? 10 : 9;
++    for (unsigned i = 0; i < events; i++) {
++        pending |= s->regs[1 + i] & ~s->regs[mask + i];
+     }
+-    /* Original DT: PMU interrupt is GPIO 6, active low. */
++    /* Active-low PMU interrupt: GPIO195 on P101, GPIO6 on N42. */
+     qemu_set_irq(s->irq, !pending);
+     if (pending && s->ap_off) {
+         a6_pmu_set_ap_power(s, true);
+@@ -2364,8 +2716,20 @@ static void a6_pmu_adc_complete(void *opaque)
+ {
+     A6PMU *s = opaque;
+     uint16_t raw = s->adc_input & 0xfff;
+-    unsigned channel = s->regs[0x48] & 0x1f;
+-    if (s->thermal_sensors) {
++    unsigned start_bit = s->d2018 ? 0x40 : 0x20;
++    unsigned channel = s->regs[0x48] & (start_bit - 1);
++    if (s->d2018 && s->thermal_sensors) {
++        /* 10B329 AppleD2018PMU converts these counts to about 25 C.
++         * The NTC lookup table uses 10 kOhm at 25 C, the internal channels
++         * use (2502 - raw) * 100 / 567, and channel 8 uses the die trim. */
++        if (channel == 2 || (channel >= 10 && channel <= 18)) {
++            raw = 819;
++        } else if (channel == 8) {
++            raw = 1051;
++        } else if (channel >= 22 && channel <= 30) {
++            raw = 2360;
++        }
++    } else if (s->thermal_sensors) {
+         /* N42's calibration resistor and external NTCs are separate analog
+          * inputs. Equal counts make the native calibration correction force
+          * the external sensors to the reference resistor's temperature. */
+@@ -2375,7 +2739,7 @@ static void a6_pmu_adc_complete(void *opaque)
+             raw = 800;
+         }
+     }
+-    if (channel == 6 && s->usb_power) {
++    if (!s->d2018 && channel == 6 && s->usb_power) {
+         /* Channel 6 is the Lightning port's USB data lines, which TriStar
+          * switches to the ADC to tell a host from a charger (its switch
+          * writes 01=0c and 0d around each conversion). A host's pull-downs
+@@ -2388,11 +2752,17 @@ static void a6_pmu_adc_complete(void *opaque)
+     }
+     s->regs[0x49] = raw & 0xf;
+     s->regs[0x4a] = raw >> 4;
+-    s->regs[0x48] &= ~0x20;
+-    s->regs[2] |= 0x20;
++    s->regs[0x48] &= ~start_bit;
++    if (s->d2018) {
++        /* P101 ISR 806000bc reads event registers 1..10 and
++         * 806000f2 dispatches the ADC wakeup on the last byte's bit 2. */
++        s->regs[0x0a] |= 0x04;
++    } else {
++        s->regs[2] |= 0x20;
++    }
+     a6_pmu_irq_update(s);
+     qemu_log_mask(LOG_UNIMP, "A6 PMU ADC channel%u raw%u completed\n",
+-                  s->regs[0x48] & 0x1f, raw);
++                  channel, raw);
+ }
+ static int a6_pmu_event(I2CSlave *dev, enum i2c_event event)
+ {
+@@ -2414,12 +2784,12 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
              current_cpu ? CPU_GET_CLASS(current_cpu)->get_pc(current_cpu) : 0);
          /* bounded: uint8_t reg addresses the 256-byte register file. */
          s->regs[reg] = data;
@@ -862,7 +1741,7 @@ index 547b8bd0af..33f0297901 100644
              /* Original D1972: hibernate uses B0=80 then 1B|=2;
               * standby (80bdf914) uses 1B|=1 after flash shutdown.
               * Both rail commands are consumed, not persistent bits. */
-@@ -2433,7 +2543,14 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
+@@ -2433,7 +2803,14 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
                  a6_pmu_set_ap_power(s, false);
              }
          }
@@ -878,7 +1757,29 @@ index 547b8bd0af..33f0297901 100644
              /* Original D1972 halt with VBUS writes B0=90, then uses
               * restart 99|=29 to enter iBoot's off-but-charging state.
               * As on the A4 PMU, this is a completed guest shutdown,
-@@ -2478,9 +2595,9 @@ static uint8_t a6_pmu_recv(I2CSlave *dev)
+@@ -2445,14 +2822,13 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
+                 qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+             }
+         }
+-        if (s->adc_probe) {
+-            if (reg == 0x48) {
+-                if ((data & 0x20) && !(previous & 0x20)) {
+-                    timer_mod(s->adc_timer,
+-                              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000000);
+-                } else if (!(data & 0x20)) {
+-                    timer_del(s->adc_timer);
+-                }
++        if ((s->d2018 || s->adc_probe) && reg == 0x48) {
++            unsigned start_bit = s->d2018 ? 0x40 : 0x20;
++            if ((data & start_bit) && !(previous & start_bit)) {
++                timer_mod(s->adc_timer,
++                          qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000000);
++            } else if (!(data & start_bit)) {
++                timer_del(s->adc_timer);
+             }
+         }
+         a6_pmu_irq_update(s);
+@@ -2478,9 +2854,9 @@ static uint8_t a6_pmu_recv(I2CSlave *dev)
       * VBUS, then 80be1f4e checks A bit6 for a selected/valid source;
       * 80be415c uses B bits1/2 for the charging phase.
       * This fixed virtual supply complements the full HDQ battery. */
@@ -890,7 +1791,29 @@ index 547b8bd0af..33f0297901 100644
          value = (value & ~0x06) | (s->usb_power ? 0x02 : 0);
      }
      if (s->battery_swi && reg == 0x0c) {
-@@ -2565,6 +2682,18 @@ static const TypeInfo a6_pmu_type = {
+@@ -2498,7 +2874,7 @@ static uint8_t a6_pmu_recv(I2CSlave *dev)
+     if (reg >= 0x64 && reg <= 0x67) {
+         value = s->rtc_latch >> (8 * (reg - 0x64));
+     }
+-    if (reg >= 1 && reg <= 9) {
++    if (reg >= 1 && reg <= (s->d2018 ? 10 : 9)) {
+         s->regs[reg] = 0;
+         a6_pmu_irq_update(s);
+     }
+@@ -2531,7 +2907,11 @@ static void a6_pmu_reset(DeviceState *dev)
+     if (s->battery_swi) {
+         s->regs[0x6d] = 0x60; /* released battery single-wire input */
+     }
+-    memset(s->regs + 0x12, 0xff, 9);
++    if (s->d2018) {
++        memset(s->regs + 0x15, 0xff, 10);
++    } else {
++        memset(s->regs + 0x12, 0xff, 9);
++    }
+     s->reg = 0;
+     s->address = false;
+     a6_pmu_irq_update(s);
+@@ -2565,6 +2945,18 @@ static const TypeInfo a6_pmu_type = {
      .instance_finalize = a6_pmu_finalize,
  };
  
@@ -909,7 +1832,7 @@ index 547b8bd0af..33f0297901 100644
  /* Initial no-accessory TriStar register qualification fixture. The original
   * N42 13A344 AppleTHS7383::start reads register 0x0f as one byte and publishes
   * it as TriStar REV; the byte is not an acceptance test. Revision zero names
-@@ -2774,9 +2903,11 @@ static const TypeInfo a6_i2c_type = {
+@@ -2774,9 +3166,11 @@ static const TypeInfo a6_i2c_type = {
  static void a6_register_types(void)
  {
      type_register_static(&a6_pmu_type);
@@ -923,10 +1846,10 @@ index 547b8bd0af..33f0297901 100644
  type_init(a6_register_types)
 diff --git a/hw/arm/s5l8955_edp.c b/hw/arm/s5l8955_edp.c
 new file mode 100644
-index 0000000000..49b31a99d0
+index 0000000000..5b88c3452d
 --- /dev/null
 +++ b/hw/arm/s5l8955_edp.c
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,200 @@
 +/*
 + * S5L8955 embedded DisplayPort transmitter for the virtual iPad panel.
 + * The Analogix AUX register layout is shared with Samsung Exynos.
@@ -935,6 +1858,7 @@ index 0000000000..49b31a99d0
 +#include "qemu/osdep.h"
 +#include "qemu/module.h"
 +#include "qapi/error.h"
++#include "hw/arm/s5l8955.h"
 +#include "hw/core/irq.h"
 +#include "hw/core/qdev-properties.h"
 +#include "hw/core/sysbus.h"
@@ -967,6 +1891,7 @@ index 0000000000..49b31a99d0
 +    MemoryRegion mmio;
 +    qemu_irq irq;
 +    AUXBus *aux;
++    uint16_t width, height;
 +    uint32_t regs[0x2000 / 4];
 +};
 +
@@ -1072,10 +1997,11 @@ index 0000000000..49b31a99d0
 +    I2CSlave *edid = i2c_slave_new(TYPE_I2CDDC, 0x50);
 +    I2CDDCState *ddc = I2CDDC(edid);
 +    qemu_edid_info info = {
-+        .prefx = 2048,
-+        .prefy = 1536,
-+        .width_mm = 197,
-+        .height_mm = 148,
++        .prefx = s->width,
++        .prefy = s->height,
++        .refresh_rate = 60000,
++        .width_mm = 148,
++        .height_mm = 197,
 +    };
 +
 +    aux_bus_realize(s->aux);
@@ -1097,11 +2023,17 @@ index 0000000000..49b31a99d0
 +    edp_update_irq(s);
 +}
 +
++static const Property edp_properties[] = {
++    DEFINE_PROP_UINT16("width", S5L8955EDPState, width, P101_PANEL_WIDTH),
++    DEFINE_PROP_UINT16("height", S5L8955EDPState, height, P101_PANEL_HEIGHT),
++};
++
 +static void edp_class_init(ObjectClass *klass, const void *data)
 +{
 +    DeviceClass *dc = DEVICE_CLASS(klass);
 +
 +    dc->realize = edp_realize;
++    device_class_set_props(dc, edp_properties);
 +    device_class_set_legacy_reset(dc, edp_reset);
 +}
 +
@@ -1118,6 +2050,18 @@ index 0000000000..49b31a99d0
 +    type_register_static(&edp_type);
 +}
 +type_init(edp_register_types)
+diff --git a/hw/arm/trace-events b/hw/arm/trace-events
+index 5d8984bc6a..13e7d77f4c 100644
+--- a/hw/arm/trace-events
++++ b/hw/arm/trace-events
+@@ -160,6 +160,7 @@ s5l8930_hdq_log(const char *msg) "%s"
+ s5l8930_i2c_log(const char *msg) "%s"
+ s5l8930_pmgr_log(const char *msg) "%s"
+ s5l8930_display_log(const char *msg) "%s"
++s5l8930_display_damage(unsigned x, unsigned y, unsigned w, unsigned h) "update %u,%u %ux%u"
+ s5l8900_fmc_log(const char *msg) "%s"
+ s5l8900_adm_log(const char *msg) "%s"
+ ipod_touch_i2s_log(const char *msg) "%s"
 diff --git a/hw/display/dpcd.c b/hw/display/dpcd.c
 index a157dc64e7..32962d44ad 100644
 --- a/hw/display/dpcd.c
@@ -1231,6 +2175,31 @@ index aec7280046..f6f59b22af 100644
      const uint8_t *packed;
      size_t packed_size;
      const uint32_t *packed_index;   /* num_cs * pages_per_cs, 1-based, 0 = absent */
+diff --git a/include/hw/arm/s5l8930.h b/include/hw/arm/s5l8930.h
+index 10c00b96e8..5ecac82a65 100644
+--- a/include/hw/arm/s5l8930.h
++++ b/include/hw/arm/s5l8930.h
+@@ -250,6 +250,7 @@ void s5l8930_hdq_set_capacity(Chardev *chr, int mah);
+  * sysbus IRQ 0 = pipe (S5L8930_IRQ_DISP_PIPE0), 1 = CLCD, 2 = RGBOUT pipe.
+  */
+ #define TYPE_S5L8930_DISPLAY "s5l8930.display"
++bool s5l8930_display_active(DeviceState *dev);
+ 
+ /*
+  * CDMA + AES filter (hw/arm/s5l8930_cdma.c). MMIO 0 = channel block
+diff --git a/include/ui/sdl2.h b/include/ui/sdl2.h
+index 9daf5ecffa..9d421132d2 100644
+--- a/include/ui/sdl2.h
++++ b/include/ui/sdl2.h
+@@ -43,6 +43,8 @@ struct sdl2_console {
+     int idle_counter;
+     int ignore_hotkeys;
+     bool gui_keysym;
++    bool user_resized;
++    uint32_t direct_buttons;
+     SDL_GLContext winctx;
+     QKbdState *kbd;
+     bool has_dmabuf;
 diff --git a/meson.build b/meson.build
 index d8b5297be2..87aeba05e7 100644
 --- a/meson.build
@@ -1247,3 +2216,1221 @@ index d8b5297be2..87aeba05e7 100644
  
  ####################
  # Global variables #
+diff --git a/tests/slice/a6-h4-isp-transport.c b/tests/slice/a6-h4-isp-transport.c
+index 51f4b264a8..4406e1571e 100644
+--- a/tests/slice/a6-h4-isp-transport.c
++++ b/tests/slice/a6-h4-isp-transport.c
+@@ -144,6 +144,39 @@ int main(void)
+     command(0xffff, 8, 0, 0);
+     assert(lduw_le_p(ram + 0x18006));
+     uint8_t args[64] = {0};
++    const uint16_t calibration_queries[] = {0x701, 0x507, 0x508};
++    for (unsigned i = 0; i < G_N_ELEMENTS(calibration_queries); i++) {
++        uint16_t op = calibration_queries[i];
++        for (unsigned ch = 0; ch < 2; ch++) {
++            command(op, 16, ch, UINT32_MAX);
++            assert(!lduw_le_p(ram + 0x18006));
++            assert(ldl_le_p(ram + 0x18008) == ch && !ldl_le_p(ram + 0x1800c));
++            assert(ram[0x18010] == 0xa5);
++        }
++        command(op, 16, 2, 0);
++        assert(lduw_le_p(ram + 0x18006));
++        assert(h4_io_command(&s, op, args, 3, 8));
++        assert(h4_io_command(&s, op, args, 4, 7));
++    }
++    memset(args, 0xa5, sizeof(args));
++    stl_le_p(args, 1);
++    stl_le_p(args + 4, 0);
++    stl_le_p(args + 8, 16);
++    assert(!h4_io_command(&s, 0x501, args, 12, 28));
++    assert(ldl_le_p(args) == 1 && ldl_le_p(args + 8) == 16);
++    for (unsigned i = 12; i < 28; i++)
++        assert(args[i] == 0);
++    assert(args[28] == 0xa5);
++    assert(h4_io_command(&s, 0x501, args, 11, 28));
++    assert(h4_io_command(&s, 0x501, args, 12, 27));
++    stl_le_p(args + 4, UINT32_MAX);
++    assert(h4_io_command(&s, 0x501, args, 12, 28));
++    stl_le_p(args + 4, 15);
++    stl_le_p(args + 8, 2);
++    assert(h4_io_command(&s, 0x501, args, 12, 28));
++    stl_le_p(args + 8, 1);
++    assert(!h4_io_command(&s, 0x501, args, 12, 13));
++    memset(args, 0, sizeof(args));
+     stl_le_p(args, 1);
+     stl_le_p(args + 4, 4);
+     assert(!h4_io_command(&s, 0x107, args, 8, 8) && s.sensor[1].mode == 4);
+diff --git a/tests/slice/a6-pmu-adc.c b/tests/slice/a6-pmu-adc.c
+index 410c69b46f..3218f97ea4 100644
+--- a/tests/slice/a6-pmu-adc.c
++++ b/tests/slice/a6-pmu-adc.c
+@@ -15,7 +15,7 @@ typedef struct QEMUTimer {
+ } QEMUTimer;
+ typedef struct A6PMU {
+     uint8_t regs[256], reg;
+-    bool address, adc_probe, thermal_sensors, battery_swi, usb_power;
++    bool address, d2018, adc_probe, thermal_sensors, battery_swi, usb_power;
+     uint16_t adc_input;
+     uint32_t rtc_latch;
+     int irq, ap_power, gpio[12];
+@@ -88,6 +88,47 @@ static void write_reg(A6PMU *s, uint8_t reg, uint8_t value)
+     address(s, reg);
+     a6_pmu_send(s, value);
+ }
++static void check_d2018_adc(void)
++{
++    QEMUTimer timer = {0};
++    A6PMU s = {.d2018 = true, .thermal_sensors = true,
++               .adc_input = 0xabc, .adc_timer = &timer};
++    a6_pmu_reset(&s);
++    assert(s.regs[0x15] == 0xff && s.regs[0x1e] == 0xff && irq_level == 1);
++
++    /* No conversion during preconditioning, or from channel-select bit 5. */
++    write_reg(&s, 0x48, 0x80 | 33);
++    assert(!timer.armed);
++    write_reg(&s, 0x48, 0xc0 | 33);
++    assert(timer.armed);
++    timer.armed = false;
++    a6_pmu_adc_complete(&s);
++    assert(s.regs[0x48] == (0x80 | 33));
++    assert(s.regs[0x0a] == 4 && irq_level == 1);
++    write_reg(&s, 0x1e, 0xfb);
++    assert(irq_level == 0);
++    address(&s, 0x49);
++    assert(a6_pmu_recv(&s) == 0x0c && a6_pmu_recv(&s) == 0xab);
++    assert(irq_level == 0);
++    address(&s, 1);
++    for (unsigned i = 1; i < 10; i++)
++        assert(a6_pmu_recv(&s) == 0);
++    assert(irq_level == 0 && a6_pmu_recv(&s) == 4 && irq_level == 1);
++
++    const unsigned inputs[][2] = {{2, 819}, {8, 1051}, {11, 819}, {30, 2360}};
++    for (unsigned i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
++        write_reg(&s, 0x48, 0x40 | inputs[i][0]);
++        assert(timer.armed);
++        timer.armed = false;
++        a6_pmu_adc_complete(&s);
++        assert((unsigned)(s.regs[0x49] | (s.regs[0x4a] << 4)) == inputs[i][1]);
++        address(&s, 0x0a);
++        assert(a6_pmu_recv(&s) == 4);
++    }
++    write_reg(&s, 0x48, 0x40);
++    write_reg(&s, 0x48, 0);
++    assert(!timer.armed && irq_level == 1);
++}
+ int main(void)
+ {
+     QEMUTimer timer = {0};
+@@ -271,6 +312,7 @@ int main(void)
+     s.regs[0x48] = 0x2a;
+     a6_pmu_adc_complete(&s);
+     assert((s.regs[0x49] | (s.regs[0x4a] << 4)) == 0xabc);
++    check_d2018_adc();
+     puts(
+-        "PASS: D1972 ADC, independent thermal inputs, event, power and RTC contracts; battery SWI isolation");
++        "PASS: D2018/D1972 ADC, independent thermal inputs, event, power and RTC contracts; battery SWI isolation");
+ }
+diff --git a/tests/slice/cs42l65-registers.c b/tests/slice/cs42l65-registers.c
+index f44fa305e7..6f6079f40d 100644
+--- a/tests/slice/cs42l65-registers.c
++++ b/tests/slice/cs42l65-registers.c
+@@ -34,7 +34,7 @@ static void header(CS42L65State *s, unsigned op, unsigned reg, bool increment,
+ }
+ int main(void)
+ {
+-    CS42L65State s;
++    CS42L65State s = {0};
+     cs42l65_reset((DeviceState *)&s);
+     /* Exact first transaction observed from the original N42 driver. */
+     header(&s, 0x6d, 1, true, 3);
+@@ -85,5 +85,12 @@ int main(void)
+     assert(byte(&s, 0) == 0x50);
+     cs42l65_reset((DeviceState *)&s);
+     assert(s.regs[0x20] == 0);
+-    puts("CS42L65 native packet/ID/register/boundary checks PASS");
++    /* P101's AppleCS42L81Audio uses the same SPI1 packet, with its own ID. */
++    s.is_cs42l81 = true;
++    cs42l65_reset((DeviceState *)&s);
++    header(&s, 0x6d, 1, true, 3);
++    assert(byte(&s, 255) == 0x42);
++    assert(byte(&s, 255) == 0xa8);
++    assert(byte(&s, 255) == 0x10);
++    puts("CS42L65 and CS42L81 native register checks PASS");
+ }
+diff --git a/tests/slice/ipad1-display-fifo.c b/tests/slice/ipad1-display-fifo.c
+index 8a611790ac..4cf2493480 100644
+--- a/tests/slice/ipad1-display-fifo.c
++++ b/tests/slice/ipad1-display-fifo.c
+@@ -5,7 +5,8 @@
+  *
+  * SLICE:types hw/arm/s5l8930_display.c define PIPE_WORDS
+  * SLICE:types hw/arm/s5l8930_display.c range typedef struct { | /* A UI layer
+- * SLICE hw/arm/s5l8930_display.c fn pipe_fifo_write pipe_fifo_write_word
++ * SLICE hw/arm/s5l8930_display.c define (DP_IRQ_STATUS|DP_IRQ_VBL|DP_IRQ_SWAP_DONE|DP_SWAP_DONE)[[:space:]]
++ * SLICE hw/arm/s5l8930_display.c fn pipe_fifo_write pipe_fifo_write_word pipe_frame_end
+  * PKG glib-2.0
+  */
+ #include <assert.h>
+@@ -18,6 +19,7 @@
+ typedef void *qemu_irq;
+ #include "types.h"
+ static void pipe_fifo_write_word(DisplayPipe *p, uint32_t val);
++static void pipe_update_irq(DisplayPipe *p) { (void)p; }
+ #include "slice.h"
+ 
+ int main(void)
+@@ -37,6 +39,20 @@ int main(void)
+     /* Between packets, bit 31 starts the next transaction. */
+     pipe_fifo_write(&p, 0xa00265f1);
+     assert(p.swap_id == 0x65f1 && p.pkt_left == 0);
++    p = (DisplayPipe){ .h5p = true };
++    pipe_fifo_write(&p, 0xa0031234);
++    pipe_fifo_write(&p, 2 << 16 | 0x3120);
++    pipe_fifo_write(&p, 0xf0808000);
++    pipe_frame_end(&p);
++    assert(p.regs[DP_IRQ_STATUS / 4] == DP_IRQ_VBL && !p.regs[DP_SWAP_DONE / 4]);
++    pipe_fifo_write(&p, 0x10);
++    assert(p.swap_pending);
++    pipe_frame_end(&p);
++    assert(p.regs[DP_SWAP_DONE / 4] == 0x1234);
++    assert(p.regs[DP_IRQ_STATUS / 4] & DP_IRQ_SWAP_DONE);
++    p.regs[DP_IRQ_STATUS / 4] = 0;
++    pipe_frame_end(&p);
++    assert(p.regs[DP_IRQ_STATUS / 4] == DP_IRQ_VBL && !p.swap_pending);
+     printf("ok\n");
+     return 0;
+ }
+diff --git a/tests/slice/ipad1-display-refresh.c b/tests/slice/ipad1-display-refresh.c
+index 427c086b41..2fdafa0e2d 100644
+--- a/tests/slice/ipad1-display-refresh.c
++++ b/tests/slice/ipad1-display-refresh.c
+@@ -8,8 +8,8 @@
+  * key[0] alone (not which layers are on).
+  *
+  * SLICE:types hw/arm/s5l8930_display.c define (DP_LAYERS|DP_UI_BASE|DP_UI_FORMAT|DP_UI_ADDR|DP_UI_STRIDE|DP_UI_UNSCALED|DP_UI_DST_ORIGIN|DP_UI_SRC_END|DP_UI_DST_END|DP_UI_FORMAT_LINEAR|DP_UI_SRC_ORIGIN)[[:space:](]
+- * SLICE:types hw/arm/s5l8930_display.c typedef UILayer
+- * SLICE hw/arm/s5l8930_display.c fn scanout_layer layer_row_bytes layer_fetch layers_fetch layer_row layers video_compose blend compose front_latch gamma_row display_update
++ * SLICE:types hw/arm/s5l8930_display.c typedef UILayer PanelDamage
++ * SLICE hw/arm/s5l8930_display.c fn scanout_layer layer_row_bytes layer_fetch layers_fetch layer_row layers video_compose blend compose front_latch gamma_row panel_damage display_update
+  * PKG glib-2.0
+  */
+ #include <assert.h>
+@@ -20,13 +20,14 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
+-#define W 16
++#define W 32
+ #define H 8
+ #define A 0x1000u
+ #define B 0x2000u
+ #define lduw_le_p(p) ((uint16_t)(((const uint8_t *)(p))[0] | ((const uint8_t *)(p))[1] << 8))
+ #define trace_event_get_state_backends(e) 0
+ #define TRACE_PRINTF(...) do { } while (0)
++#define trace_s5l8930_display_damage(...) do { } while (0)
+ 
+ typedef struct { uint32_t regs[0x6000 / 4]; uint32_t swap_id; } DisplayPipe;
+ #include "types.h"
+@@ -36,12 +37,13 @@ typedef struct { DisplaySurface surface; } QemuConsole;
+ 
+ typedef struct S5L8930DisplayState {
+     bool h5p;
++    bool sleep_hint;
+     DisplayPipe pipe[1];
+     QemuConsole *con;
+     uint8_t *front, *front_next;
+     size_t front_size;
+     uint32_t front_key[4];
+-    bool front_valid;
++    bool front_valid, previous_front_valid;
+     uint64_t front_gen;
+     uint8_t *src, *src_next;
+     size_t src_size, src_len;
+@@ -55,6 +57,7 @@ typedef struct S5L8930DisplayState {
+ 
+ static uint8_t ram[0x10000];
+ static unsigned updates;
++static int update_y, update_height;
+ 
+ static void panel_size(S5L8930DisplayState *s, unsigned *w, unsigned *h) { *w = W; *h = H; }
+ static void fb_read(S5L8930DisplayState *s, uint32_t va, uint8_t *dst, unsigned len, const uint32_t *tables)
+@@ -70,7 +73,13 @@ static int surface_bits_per_pixel(DisplaySurface *d) { return 32; }
+ static int surface_stride(DisplaySurface *d) { return W * 4; }
+ static uint8_t *surface_data(DisplaySurface *d) { return d->data; }
+ static void qemu_console_resize(QemuConsole *c, int w, int h) { abort(); }
+-static void dpy_gfx_update(QemuConsole *c, int x, int y, int w, int h) { updates++; }
++static void dpy_gfx_update(QemuConsole *c, int x, int y, int w, int h)
++{
++    updates++;
++    update_y = y;
++    update_height = h;
++}
++static void display_sleep_hint(DisplaySurface *surface, unsigned w, unsigned h) { abort(); }
+ 
+ #include "slice.h"
+ 
+@@ -117,6 +126,25 @@ int main(void)
+     layer(r, 0, 0x4000);
+     display_update(s);
+     assert(updates == 3 && !memcmp(con.surface.data, ram + 0x4000, W * H * 4));
++    s->h5p = true;
++    uint32_t *ui = r + DP_UI_BASE(0) / 4;
++    ui[0x60 / 4] = 0;
++    ui[0x70 / 4] = ui[0x58 / 4] = W << 16 | H;
++    front_latch(s);
++    display_update(s);
++    ram[0x4000 + 2 * W * 4] ^= 0xff;
++    front_latch(s);
++    display_update(s);
++    assert(update_y == 2 && update_height == 1);
++    assert(!memcmp(con.surface.data, ram + 0x4000, W * H * 4));
++    /* A presentation skipped two latches. The first change is still owed. */
++    ram[0x4000 + W * 4] ^= 0xff;
++    front_latch(s);
++    ram[0x4000 + 4 * W * 4] ^= 0xff;
++    front_latch(s);
++    display_update(s);
++    assert(update_y == 0 && update_height == H);
++    assert(!memcmp(con.surface.data, ram + 0x4000, W * H * 4));
+     puts("PASS: refresh shows the latched frame across a queued base; a layer change shows live");
+     return 0;
+ }
+diff --git a/tests/slice/ipad1-display-relatch.c b/tests/slice/ipad1-display-relatch.c
+index d45d9ef363..9227e15330 100644
+--- a/tests/slice/ipad1-display-relatch.c
++++ b/tests/slice/ipad1-display-relatch.c
+@@ -33,7 +33,7 @@ typedef struct S5L8930DisplayState {
+     uint8_t *front, *front_next;
+     size_t front_size;
+     uint32_t front_key[4];
+-    bool front_valid;
++    bool front_valid, previous_front_valid;
+     uint64_t front_gen;
+     uint8_t *src, *src_next;
+     size_t src_size, src_len;
+@@ -153,5 +153,20 @@ int main(void)
+     for (unsigned i = 0; i < W * H; i++) {
+         assert(s->front[i * 4] == 219 && s->front[i * 4 + 1] == 219 && s->front[i * 4 + 2] == 219);
+     }
++    /* The iPad's unscaled H5P UI plane can be latched straight from padded
++     * guest rows. A prior blended frame must not survive the transition. */
++    s->h5p = true;
++    r[DP_LAYERS / 4] = 0x100;
++    uint32_t *ui = r + DP_UI_BASE(0) / 4;
++    ui[0x58 / 4] = ui[0x70 / 4] = W << 16 | H;
++    ui[0x60 / 4] = 0;
++    ui[DP_UI_STRIDE / 4] = 128;
++    front_latch(s);
++    assert(s->front_valid && s->front_gen == 6 && s->src_len == 0);
++    for (unsigned y = 0; y < H; y++) {
++        assert(!memcmp(s->front + y * W * 4, ram + base0 + y * 128, W * 4));
++    }
++    front_latch(s);
++    assert(s->front_gen == 6);
+     return 0;
+ }
+diff --git a/tests/slice/ipad1-display-tiled.c b/tests/slice/ipad1-display-tiled.c
+index 1e2e87cd3c..c734321329 100644
+--- a/tests/slice/ipad1-display-tiled.c
++++ b/tests/slice/ipad1-display-tiled.c
+@@ -37,7 +37,7 @@ typedef struct S5L8930DisplayState {
+     uint8_t *front, *front_next;
+     size_t front_size;
+     uint32_t front_key[4];
+-    bool front_valid;
++    bool front_valid, previous_front_valid;
+     uint64_t front_gen;
+     uint8_t *src, *src_next;
+     size_t src_size, src_len;
+diff --git a/tests/slice/ipad1-display-window.c b/tests/slice/ipad1-display-window.c
+index 9c23ddb69f..55420a436c 100644
+--- a/tests/slice/ipad1-display-window.c
++++ b/tests/slice/ipad1-display-window.c
+@@ -37,7 +37,7 @@ typedef struct S5L8930DisplayState {
+     uint8_t *front, *front_next;
+     size_t front_size;
+     uint32_t front_key[4];
+-    bool front_valid;
++    bool front_valid, previous_front_valid;
+     uint64_t front_gen;
+     uint8_t *src, *src_next;
+     size_t src_size, src_len;
+diff --git a/tests/slice/p101-boot-wake.c b/tests/slice/p101-boot-wake.c
+new file mode 100644
+index 0000000000..a85d902914
+--- /dev/null
++++ b/tests/slice/p101-boot-wake.c
+@@ -0,0 +1,120 @@
++/* SLICE hw/arm/s5l8950.c fn p101_tap_home p101_boot_wake p101_mouse_event
++ * SLICE:panel include/hw/arm/s5l8955.h define P101_PANEL_.*
++ * CFLAGS -Wall -Werror
++ */
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include "panel.h"
++
++_Static_assert(P101_PANEL_WIDTH == 1536 && P101_PANEL_HEIGHT == 2048,
++               "P101 scanout uses native portrait coordinates");
++
++enum { QEMU_CLOCK_VIRTUAL, IPOD_TOUCH_BUTTON_HOME };
++typedef struct {
++    bool *display;
++    int64_t *boot_wake_timer;
++    int64_t boot_wake_deadline;
++    int64_t boot_dark_since;
++    bool wake_click;
++} S5L8950State;
++
++typedef struct {
++    bool touch_down;
++} IPodTouchMultitouchState;
++
++static S5L8950State *machine;
++static int64_t guest_time;
++static unsigned presses;
++static unsigned touches;
++
++#define S5L8950_MACHINE(obj) (obj)
++
++static S5L8950State *qdev_get_machine(void)
++{
++    return machine;
++}
++
++static void a6_mouse_event(void *opaque, int x, int y, int z, int buttons)
++{
++    IPodTouchMultitouchState *mt = opaque;
++
++    (void)x;
++    (void)y;
++    (void)z;
++    mt->touch_down = buttons != 0;
++    touches++;
++}
++
++static int64_t qemu_clock_get_ms(int clock)
++{
++    assert(clock == QEMU_CLOCK_VIRTUAL);
++    return guest_time;
++}
++
++static bool s5l8930_display_active(bool *active)
++{
++    return *active;
++}
++
++static void s5l8950_press_button(int button, bool down)
++{
++    assert(button == IPOD_TOUCH_BUTTON_HOME);
++    assert(down == ((presses & 1) == 0));
++    presses++;
++}
++
++static void timer_mod(int64_t *pending, int64_t deadline)
++{
++    *pending = deadline;
++}
++
++#include "slice.h"
++
++static void tick(S5L8950State *s, int64_t now)
++{
++    guest_time = now;
++    *s->boot_wake_timer = -1;
++    p101_boot_wake(s);
++}
++
++int main(void)
++{
++    bool active = true;
++    int64_t pending;
++    S5L8950State s = {
++        .display = &active,
++        .boot_wake_timer = &pending,
++        .boot_wake_deadline = 120000,
++        .boot_dark_since = -1,
++    };
++
++    tick(&s, 30000);
++    assert(pending == 30250 && presses == 0);
++    active = false;
++    tick(&s, 40000);
++    assert(pending == 40250 && s.boot_dark_since == 40000);
++    active = true;
++    tick(&s, 40500);
++    assert(s.boot_dark_since == -1 && presses == 0);
++    active = false;
++    tick(&s, 41000);
++    tick(&s, 41500);
++    assert(pending == 41750 && presses == 0);
++    tick(&s, 41750);
++    assert(pending == -1 && presses == 2);
++    tick(&s, 120000);
++    assert(pending == -1 && presses == 2);
++
++    IPodTouchMultitouchState mt = {0};
++    machine = &s;
++    p101_mouse_event(&mt, 100, 100, 0, 1);
++    assert(s.wake_click && presses == 4 && touches == 0);
++    active = true;
++    p101_mouse_event(&mt, 120, 100, 0, 1);
++    p101_mouse_event(&mt, 120, 100, 0, 0);
++    assert(!s.wake_click && touches == 0);
++    p101_mouse_event(&mt, 120, 100, 0, 1);
++    assert(touches == 1 && mt.touch_down);
++    return 0;
++}
+diff --git a/tests/slice/sdl2-window-fit.c b/tests/slice/sdl2-window-fit.c
+new file mode 100644
+index 0000000000..a6fa408d7d
+--- /dev/null
++++ b/tests/slice/sdl2-window-fit.c
+@@ -0,0 +1,43 @@
++/* SLICE ui/sdl2.c fn sdl2_fit_size sdl2_mouse_axis sdl2_direct_button_state
++ * CFLAGS -Wall -Werror
++ */
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++
++#define MAX(a, b) ((a) > (b) ? (a) : (b))
++#include "slice.h"
++
++static void check_fit(int width, int height, int max_w, int max_h,
++                      int expected_w, int expected_h)
++{
++    sdl2_fit_size(&width, &height, max_w, max_h);
++    assert(width == expected_w);
++    assert(height == expected_h);
++}
++
++int main(void)
++{
++    check_fit(2048, 1536, 1904, 992, 1322, 992);
++    check_fit(2048, 1536, 1000, 1200, 1000, 750);
++    check_fit(1536, 2048, 1120, 700, 525, 700);
++    check_fit(640, 480, 1904, 992, 640, 480);
++    check_fit(2048, 1536, 1, 1, 1, 1);
++
++    /* SDL delivers logical 2D coordinates, even with a non-4:3 window. */
++    assert(sdl2_mouse_axis(834, 1000, 2048, true) == 834);
++    assert(sdl2_mouse_axis(1408, 800, 1536, true) == 1408);
++    assert(sdl2_mouse_axis(-20, 1000, 2048, true) == -20);
++
++    /* Other renderers deliver coordinates in window units. */
++    assert(sdl2_mouse_axis(500, 1000, 2048, false) == 1024);
++    assert(sdl2_mouse_axis(400, 800, 1536, false) == 768);
++    assert(sdl2_mouse_axis(-10, 1000, 2048, false) == -20);
++
++    /* Letterbox clicks never start a touch. A drag can end in the bars. */
++    assert(sdl2_direct_button_state(0, 1, true, -30, 760, 2048, 1536) == 0);
++    assert(sdl2_direct_button_state(0, 1, true, 1024, 1536, 2048, 1536) == 0);
++    assert(sdl2_direct_button_state(0, 1, true, 2047, 1535, 2048, 1536) == 1);
++    assert(sdl2_direct_button_state(1, 1, false, 2060, 1600, 2048, 1536) == 0);
++    return 0;
++}
+diff --git a/ui/sdl2-2d.c b/ui/sdl2-2d.c
+index 73052383c2..16916589cb 100644
+--- a/ui/sdl2-2d.c
++++ b/ui/sdl2-2d.c
+@@ -28,12 +28,75 @@
+ #include "ui/input.h"
+ #include "ui/sdl2.h"
+ 
++static SDL_Texture *sdl2_2d_minify(struct sdl2_console *scon)
++{
++    SDL_Renderer *renderer = scon->real_renderer;
++    SDL_Texture *source = scon->texture;
++    int width = surface_width(scon->surface);
++    int height = surface_height(scon->surface);
++    float scale_x, scale_y;
++    const char *quality;
++
++    /*
++     * A bilinear sample covers only two texels on each axis. At larger
++     * reductions, thin strokes can disappear between samples. Halve the
++     * image in stages, then let the logical viewport do the final fit.
++     */
++    SDL_RenderGetScale(renderer, &scale_x, &scale_y);
++    if (scale_x <= 0 || scale_y <= 0 || scale_x >= 0.5f || scale_y >= 0.5f ||
++        !SDL_RenderTargetSupported(renderer)) {
++        return source;
++    }
++    /* Preserve an explicit nearest-neighbour preference. */
++    quality = SDL_GetHint(SDL_HINT_RENDER_SCALE_QUALITY);
++    if (!quality || quality[0] == '0' || !SDL_strcasecmp(quality, "nearest")) {
++        return source;
++    }
++    for (int level = 0; scale_x < 0.5f && scale_y < 0.5f &&
++         width > 1 && height > 1; level++) {
++        char key[40];
++        int old_width, old_height;
++        SDL_Texture *half;
++
++        width = (width + 1) / 2;
++        height = (height + 1) / 2;
++        /* The renderer owns these cached targets until window destruction. */
++        snprintf(key, sizeof(key), "qemu.sdl2.minify.%d", level);
++        half = SDL_GetWindowData(scon->real_window, key);
++        if (half && (SDL_QueryTexture(half, NULL, NULL,
++                                     &old_width, &old_height) < 0 ||
++                     old_width != width || old_height != height)) {
++            SDL_DestroyTexture(half);
++            SDL_SetWindowData(scon->real_window, key, NULL);
++            half = NULL;
++        }
++        if (!half) {
++            half = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
++                                     SDL_TEXTUREACCESS_TARGET, width, height);
++            if (!half) {
++                break;
++            }
++            SDL_SetWindowData(scon->real_window, key, half);
++        }
++        if (SDL_SetRenderTarget(renderer, half) < 0 ||
++            SDL_RenderCopy(renderer, source, NULL, NULL) < 0) {
++            break;
++        }
++        source = half;
++        scale_x *= 2;
++        scale_y *= 2;
++    }
++    SDL_SetRenderTarget(renderer, NULL);
++    return source;
++}
++
+ void sdl2_2d_update(DisplayChangeListener *dcl,
+                     int x, int y, int w, int h)
+ {
+     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
+     DisplaySurface *surf = scon->surface;
+     SDL_Rect rect;
++    SDL_Texture *source;
+     size_t surface_data_offset;
+     assert(!scon->opengl);
+ 
+@@ -51,8 +114,9 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
+     SDL_UpdateTexture(scon->texture, &rect,
+                       surface_data(surf) + surface_data_offset,
+                       surface_stride(surf));
++    source = sdl2_2d_minify(scon);
+     SDL_RenderClear(scon->real_renderer);
+-    SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, NULL);
++    SDL_RenderCopy(scon->real_renderer, source, NULL, NULL);
+     SDL_RenderPresent(scon->real_renderer);
+ }
+ 
+@@ -79,7 +143,7 @@ void sdl2_2d_switch(DisplayChangeListener *dcl,
+ 
+     if (!scon->real_window) {
+         sdl2_window_create(scon);
+-    } else if (old_surface &&
++    } else if (!scon->user_resized && old_surface &&
+                ((surface_width(old_surface)  != surface_width(new_surface)) ||
+                 (surface_height(old_surface) != surface_height(new_surface)))) {
+         sdl2_window_resize(scon);
+diff --git a/ui/sdl2.c b/ui/sdl2.c
+index eccc5b0e90..17e58ae3fa 100644
+--- a/ui/sdl2.c
++++ b/ui/sdl2.c
+@@ -80,22 +80,85 @@ static struct sdl2_console *get_scon_from_window(uint32_t window_id)
+     return NULL;
+ }
+ 
++static void sdl2_fit_size(int *width, int *height, int max_w, int max_h)
++{
++    max_w = MAX(1, max_w);
++    max_h = MAX(1, max_h);
++    if (*width <= max_w && *height <= max_h) {
++        return;
++    }
++    if ((int64_t)*width * max_h > (int64_t)*height * max_w) {
++        *height = MAX(1, (int64_t)*height * max_w / *width);
++        *width = max_w;
++    } else {
++        *width = MAX(1, (int64_t)*width * max_h / *height);
++        *height = max_h;
++    }
++}
++
++static void sdl2_size_window(struct sdl2_console *scon, bool center)
++{
++    SDL_Window *window = scon->real_window;
++    SDL_Rect work;
++    int width = surface_width(scon->surface);
++    int height = surface_height(scon->surface);
++    int display = SDL_GetWindowDisplayIndex(window);
++    int x, y, top, left, bottom, right;
++
++    if (SDL_GetWindowFlags(window) & (SDL_WINDOW_FULLSCREEN |
++                                    SDL_WINDOW_MAXIMIZED)) {
++        return;
++    }
++    if (display < 0) {
++        display = 0;
++    }
++    if (SDL_GetDisplayUsableBounds(display, &work) < 0 &&
++        SDL_GetDisplayBounds(display, &work) < 0) {
++        return;
++    }
++    if (SDL_GetWindowBordersSize(window, &top, &left, &bottom, &right) < 0) {
++        /* Some window managers only report decorations once shown. */
++        top = 40;
++        left = bottom = right = 8;
++    }
++    work.x += left;
++    work.y += top;
++    work.w -= left + right;
++    work.h -= top + bottom;
++    if (work.w < 1 || work.h < 1) {
++        return;
++    }
++
++    sdl2_fit_size(&width, &height, work.w, work.h);
++    SDL_GetWindowPosition(window, &x, &y);
++    if (center) {
++        x = work.x + (work.w - width) / 2;
++        y = work.y + (work.h - height) / 2;
++    } else {
++        x = CLAMP(x, work.x, work.x + work.w - width);
++        y = CLAMP(y, work.y, work.y + work.h - height);
++    }
++    SDL_SetWindowSize(window, width, height);
++    SDL_SetWindowPosition(window, x, y);
++}
++
+ void sdl2_window_create(struct sdl2_console *scon)
+ {
+-    int flags = 0;
++    int flags = SDL_WINDOW_HIDDEN;
++    int width, height;
+ 
+     if (!scon->surface) {
+         return;
+     }
+     assert(!scon->real_window);
++    width = surface_width(scon->surface);
++    height = surface_height(scon->surface);
+ 
+     if (gui_fullscreen) {
+         flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+     } else {
+         flags |= SDL_WINDOW_RESIZABLE;
+-    }
+-    if (scon->hidden) {
+-        flags |= SDL_WINDOW_HIDDEN;
++        sdl2_fit_size(&width, &height, 640, 480);
+     }
+ #ifdef CONFIG_OPENGL
+     if (scon->opengl) {
+@@ -104,10 +167,11 @@ void sdl2_window_create(struct sdl2_console *scon)
+ #endif
+ 
+     scon->real_window = SDL_CreateWindow("", SDL_WINDOWPOS_UNDEFINED,
+-                                         SDL_WINDOWPOS_UNDEFINED,
+-                                         surface_width(scon->surface),
+-                                         surface_height(scon->surface),
+-                                         flags);
++                                         SDL_WINDOWPOS_UNDEFINED, width,
++                                         height, flags);
++    if (!gui_fullscreen) {
++        sdl2_size_window(scon, true);
++    }
+     if (scon->opengl) {
+         const char *driver = "opengl";
+ 
+@@ -132,6 +196,9 @@ void sdl2_window_create(struct sdl2_console *scon)
+     }
+ 
+     sdl_update_caption(scon);
++    if (!scon->hidden) {
++        SDL_ShowWindow(scon->real_window);
++    }
+ }
+ 
+ void sdl2_window_destroy(struct sdl2_console *scon)
+@@ -150,6 +217,8 @@ void sdl2_window_destroy(struct sdl2_console *scon)
+     }
+     SDL_DestroyWindow(scon->real_window);
+     scon->real_window = NULL;
++    scon->user_resized = false;
++    scon->direct_buttons = 0;
+ }
+ 
+ void sdl2_window_resize(struct sdl2_console *scon)
+@@ -158,9 +227,7 @@ void sdl2_window_resize(struct sdl2_console *scon)
+         return;
+     }
+ 
+-    SDL_SetWindowSize(scon->real_window,
+-                      surface_width(scon->surface),
+-                      surface_height(scon->surface));
++    sdl2_size_window(scon, false);
+ }
+ 
+ static void sdl2_redraw(struct sdl2_console *scon)
+@@ -284,10 +351,21 @@ static void sdl_grab_end(struct sdl2_console *scon)
+     sdl_update_caption(scon);
+ }
+ 
++static bool sdl2_direct_pointer(struct sdl2_console *scon)
++{
++    /* A visible host pointer can drive a touchscreen without confinement. */
++    return scon->real_renderer && scon->opts->show_cursor &&
++        qemu_input_is_absolute(scon->dcl.con);
++}
++
+ static void absolute_mouse_grab(struct sdl2_console *scon)
+ {
+     int mouse_x, mouse_y;
+     int scr_w, scr_h;
++
++    if (!gui_fullscreen && sdl2_direct_pointer(scon)) {
++        return;
++    }
+     SDL_GetMouseState(&mouse_x, &mouse_y);
+     SDL_GetWindowSize(scon->real_window, &scr_w, &scr_h);
+     if (mouse_x > 0 && mouse_x < scr_w - 1 &&
+@@ -330,10 +408,13 @@ static void sdl_send_mouse_event(struct sdl2_console *scon, int dx, int dy,
+     }
+ 
+     if (qemu_input_is_absolute(scon->dcl.con)) {
++        int width = surface_width(scon->surface);
++        int height = surface_height(scon->surface);
++
+         qemu_input_queue_abs(scon->dcl.con, INPUT_AXIS_X,
+-                             x, 0, surface_width(scon->surface));
++                             CLAMP(x, 0, width), 0, width);
+         qemu_input_queue_abs(scon->dcl.con, INPUT_AXIS_Y,
+-                             y, 0, surface_height(scon->surface));
++                             CLAMP(y, 0, height), 0, height);
+     } else {
+         if (guest_cursor) {
+             x -= guest_x;
+@@ -433,6 +514,7 @@ static void handle_keydown(SDL_Event *ev)
+             }
+             break;
+         case SDL_SCANCODE_0:
++            scon->user_resized = false;
+             sdl2_window_resize(scon);
+             if (!scon->opengl) {
+                 /* re-create scon->texture */
+@@ -495,39 +577,70 @@ static void handle_textinput(SDL_Event *ev)
+     }
+ }
+ 
++static int sdl2_mouse_axis(int coordinate, int window_size, int surface_size,
++                           bool logical)
++{
++    /* SDL's 2D renderer already maps events into its logical viewport. */
++    if (logical || window_size <= 0) {
++        return coordinate;
++    }
++    return (int64_t)coordinate * surface_size / window_size;
++}
++
++static uint32_t sdl2_direct_button_state(uint32_t buttons, uint32_t mask,
++                                        bool down, int x, int y,
++                                        int width, int height)
++{
++    if (!down) {
++        return buttons & ~mask;
++    }
++    if (x >= 0 && x < width && y >= 0 && y < height) {
++        return buttons | mask;
++    }
++    return buttons;
++}
++
+ static void handle_mousemotion(SDL_Event *ev)
+ {
+-    int max_x, max_y;
+     struct sdl2_console *scon = get_scon_from_window(ev->motion.windowID);
+     int scr_w, scr_h, surf_w, surf_h, x, y, dx, dy;
++    bool absolute, direct, logical;
+ 
+     if (!scon || !qemu_console_is_graphic(scon->dcl.con)) {
+         return;
+     }
+ 
+     SDL_GetWindowSize(scon->real_window, &scr_w, &scr_h);
+-    if (qemu_input_is_absolute(scon->dcl.con) || absolute_enabled) {
+-        max_x = scr_w - 1;
+-        max_y = scr_h - 1;
++    logical = scon->real_renderer != NULL;
++    absolute = qemu_input_is_absolute(scon->dcl.con) || absolute_enabled;
++    direct = sdl2_direct_pointer(scon);
++    if (absolute && (!direct || gui_fullscreen)) {
++        int max_x = scr_w - 1, max_y = scr_h - 1;
++        int win_x = ev->motion.x, win_y = ev->motion.y;
++
++        if (logical) {
++            /* Edge grabs use window coordinates, including the black bars. */
++            SDL_GetMouseState(&win_x, &win_y);
++        }
+         if (gui_grab && !gui_fullscreen
+-            && (ev->motion.x == 0 || ev->motion.y == 0 ||
+-                ev->motion.x == max_x || ev->motion.y == max_y)) {
++            && (win_x == 0 || win_y == 0 || win_x == max_x || win_y == max_y)) {
+             sdl_grab_end(scon);
+         }
+-        if (!gui_grab &&
+-            (ev->motion.x > 0 && ev->motion.x < max_x &&
+-             ev->motion.y > 0 && ev->motion.y < max_y)) {
++        if (!gui_grab && win_x > 0 && win_x < max_x &&
++            win_y > 0 && win_y < max_y) {
+             sdl_grab_start(scon);
+         }
+     }
+     surf_w = surface_width(scon->surface);
+     surf_h = surface_height(scon->surface);
+-    x = (int64_t)ev->motion.x * surf_w / scr_w;
+-    y = (int64_t)ev->motion.y * surf_h / scr_h;
+-    dx = (int64_t)ev->motion.xrel * surf_w / scr_w;
+-    dy = (int64_t)ev->motion.yrel * surf_h / scr_h;
+-    if (gui_grab || qemu_input_is_absolute(scon->dcl.con) || absolute_enabled) {
+-        sdl_send_mouse_event(scon, dx, dy, x, y, ev->motion.state);
++    x = sdl2_mouse_axis(ev->motion.x, scr_w, surf_w, logical);
++    y = sdl2_mouse_axis(ev->motion.y, scr_h, surf_h, logical);
++    dx = sdl2_mouse_axis(ev->motion.xrel, scr_w, surf_w, logical);
++    dy = sdl2_mouse_axis(ev->motion.yrel, scr_h, surf_h, logical);
++    if (gui_grab || absolute) {
++        uint32_t buttons = direct ? scon->direct_buttons : ev->motion.state;
++
++        sdl_send_mouse_event(scon, dx, dy, x, y, buttons);
+     }
+ }
+ 
+@@ -536,7 +649,7 @@ static void handle_mousebutton(SDL_Event *ev)
+     int buttonstate = SDL_GetMouseState(NULL, NULL);
+     SDL_MouseButtonEvent *bev;
+     struct sdl2_console *scon = get_scon_from_window(ev->button.windowID);
+-    int scr_w, scr_h, x, y;
++    int scr_w, scr_h, surf_w, surf_h, x, y;
+ 
+     if (!scon || !qemu_console_is_graphic(scon->dcl.con)) {
+         return;
+@@ -544,10 +657,21 @@ static void handle_mousebutton(SDL_Event *ev)
+ 
+     bev = &ev->button;
+     SDL_GetWindowSize(scon->real_window, &scr_w, &scr_h);
+-    x = (int64_t)bev->x * surface_width(scon->surface) / scr_w;
+-    y = (int64_t)bev->y * surface_height(scon->surface) / scr_h;
++    surf_w = surface_width(scon->surface);
++    surf_h = surface_height(scon->surface);
++    x = sdl2_mouse_axis(bev->x, scr_w, surf_w, scon->real_renderer != NULL);
++    y = sdl2_mouse_axis(bev->y, scr_h, surf_h, scon->real_renderer != NULL);
++
++    if (sdl2_direct_pointer(scon)) {
++        uint32_t buttons = sdl2_direct_button_state(scon->direct_buttons,
++            SDL_BUTTON(bev->button), ev->type == SDL_MOUSEBUTTONDOWN,
++            x, y, surf_w, surf_h);
+ 
+-    if (!gui_grab && !qemu_input_is_absolute(scon->dcl.con)) {
++        if (buttons != scon->direct_buttons) {
++            scon->direct_buttons = buttons;
++            sdl_send_mouse_event(scon, 0, 0, x, y, buttons);
++        }
++    } else if (!gui_grab && !qemu_input_is_absolute(scon->dcl.con)) {
+         if (ev->type == SDL_MOUSEBUTTONUP && bev->button == SDL_BUTTON_LEFT) {
+             /* start grabbing all events */
+             sdl_grab_start(scon);
+@@ -603,13 +727,18 @@ static void handle_windowevent(SDL_Event *ev)
+     case SDL_WINDOWEVENT_RESIZED:
+         {
+             QemuUIInfo info;
++
++            if (!(SDL_GetWindowFlags(scon->real_window) &
++                  (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED))) {
++                scon->user_resized = true;
++            }
+             memset(&info, 0, sizeof(info));
+             info.width = ev->window.data1;
+             info.height = ev->window.data2;
+             dpy_set_ui_info(scon->dcl.con, &info, true);
+         }
+-        sdl2_redraw(scon);
+         break;
++    case SDL_WINDOWEVENT_SIZE_CHANGED:
+     case SDL_WINDOWEVENT_EXPOSED:
+         sdl2_redraw(scon);
+         break;
+@@ -903,6 +1032,7 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
+     }
+ #ifdef SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR /* only available since SDL 2.0.8 */
+     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
++    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
+ #endif
+     SDL_SetHint(SDL_HINT_GRAB_KEYBOARD, "1");
+ #ifdef SDL_HINT_ALLOW_ALT_TAB_WHILE_GRABBED
+diff --git a/include/hw/arm/s5l8955.h b/include/hw/arm/s5l8955.h
+new file mode 100644
+index 0000000000..fae084dab8
+--- /dev/null
++++ b/include/hw/arm/s5l8955.h
+@@ -0,0 +1,12 @@
++/*
++ * Apple S5L8955 (A6X), iPad 4 Wi-Fi (P101AP).
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#ifndef HW_ARM_S5L8955_H
++#define HW_ARM_S5L8955_H
++
++/* The panel's native portrait coordinates are shared by scanout and EDID. */
++#define P101_PANEL_WIDTH  1536
++#define P101_PANEL_HEIGHT 2048
++
++#endif
+diff --git a/tests/slice/p101-panel.c b/tests/slice/p101-panel.c
+new file mode 100644
+index 0000000000..4c58c9086c
+--- /dev/null
++++ b/tests/slice/p101-panel.c
+@@ -0,0 +1,76 @@
++/* SLICE:types include/hw/arm/s5l8955.h define P101_PANEL_.*
++ * SLICE:types include/hw/arm/s5l8930.h typedef A4DTEdit
++ * SLICE hw/arm/s5l8950.c fn p101_prepare_display
++ * SLICE hw/arm/s5l8950.c fn p101_splash_row
++ * SLICE:scan hw/arm/s5l8930_display.c define DP_SIZE[[:space:]]
++ * SLICE:scan hw/arm/s5l8930_display.c fn panel_size
++ */
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <string.h>
++#include "types.h"
++
++/* The slice runs on the little-endian host used to build the Windows engine. */
++#define cpu_to_le32(v) (v)
++#define MAX(a, b) ((a) > (b) ? (a) : (b))
++static void stl_le_p(void *dst, uint32_t n) { memcpy(dst, &n, 4); }
++
++static unsigned scale, ppi;
++static void a4_dt_edit(uint8_t *image, size_t len, uint32_t base, uint32_t args,
++                       const A4DTEdit *edit)
++{
++    assert(edit->vlen == 4);
++    if (!strcmp(edit->name, "chosen") && !strcmp(edit->prop, "display-scale")) {
++        memcpy(&scale, edit->value, 4);
++    } else {
++        assert(!strcmp(edit->name, "clcd") && !strcmp(edit->prop, "dot-pitch"));
++        memcpy(&ppi, edit->value, 4);
++    }
++}
++#include "slice.h"
++
++typedef struct { uint32_t regs[0x2000 / 4]; } DisplayPipe;
++typedef struct {
++    DisplayPipe pipe[1];
++    bool h5p;
++    unsigned pw, ph, width, height;
++} S5L8930DisplayState;
++static uint32_t panel_word(DisplayPipe *pipe, unsigned offset, uint32_t v) { return v; }
++#include "scan.h"
++
++int main(void)
++{
++    uint32_t words[16] = {0};
++    for (unsigned density = 1; density <= 2; density++) {
++        /* Simulate an existing bundle with the previous landscape geometry. */
++        words[8] = 2048;
++        words[9] = 1536;
++        assert(p101_prepare_display((uint8_t *)words, sizeof(words), 0x8000,
++                                    0x8000, 768 * density, 1024 * density));
++        assert(words[7] == 3072 * density && words[8] == 768 * density);
++        assert(words[9] == 1024 * density && words[10] == (32 | ((density-1) << 16)));
++        assert(scale == density && ppi == 132 * density);
++    }
++    assert(!p101_prepare_display((uint8_t *)words, 0x37, 8, 8, 768, 1024));
++    assert(!p101_prepare_display((uint8_t *)words, sizeof(words), 8, 7, 768, 1024));
++    S5L8930DisplayState s = {.h5p = true, .width = 1536, .height = 2048};
++    unsigned w, h;
++    s.pipe[0].regs[DP_SIZE / 4] = 2048u << 16 | 1536;
++    panel_size(&s, &w, &h);
++    assert(w == 2048 && h == 1536);
++    s.pipe[0].regs[DP_SIZE / 4] = 0;
++    panel_size(&s, &w, &h);
++    assert(w == 1536 && h == 2048);
++    uint32_t logo[2048] = {0}, row[1536] = {0};
++    logo[1024] = 0x203040;
++    assert(p101_splash_row(row, 1536, 2048, 1024, (const uint8_t *)logo,
++                           2048, 1536, 768, 1));
++    assert(row[768] == logo[1024] && !row[767] && !row[769]);
++    assert(p101_splash_row(row, 768, 1024, 512, (const uint8_t *)logo,
++                           2048, 1536, 768, 1));
++    assert(row[384] == logo[1024] && !row[383] && !row[385]);
++    assert(!p101_splash_row(row, 768, 1024, 511, (const uint8_t *)logo,
++                            2048, 1536, 768, 1));
++    return 0;
++}
+diff --git a/tests/slice/p101-panel-damage.c b/tests/slice/p101-panel-damage.c
+new file mode 100644
+index 0000000000..03a26c3326
+--- /dev/null
++++ b/tests/slice/p101-panel-damage.c
+@@ -0,0 +1,29 @@
++/* SLICE:types hw/arm/s5l8930_display.c typedef PanelDamage
++ * SLICE hw/arm/s5l8930_display.c fn panel_damage
++ */
++#include <assert.h>
++#include <stdint.h>
++#include <string.h>
++#define MIN(a, b) ((a) < (b) ? (a) : (b))
++#include "types.h"
++#include "slice.h"
++
++int main(void)
++{
++    enum { W = 97, H = 11 };
++    uint32_t old[W * H] = {0}, now[W * H] = {0};
++    for (unsigned y = 2; y <= 6; y++) {
++        for (unsigned x = 32; x < 51; x++) {
++            now[y * W + x] = 1;
++        }
++    }
++    PanelDamage d = panel_damage(old, now, W, H);
++    assert(d.top == 2 && d.bottom == 7 && d.left == 32 && d.right >= 51 && d.right < W);
++    now[0] = 2;
++    now[W * H - 1] = 3;
++    d = panel_damage(old, now, W, H);
++    assert(d.left == 0 && d.right == W && d.top == 0 && d.bottom == H);
++    d = panel_damage(now, now, W, H);
++    assert(d.top == d.bottom);
++    return 0;
++}
+diff --git a/tests/slice/sdl2-minify.c b/tests/slice/sdl2-minify.c
+new file mode 100644
+index 0000000000..3d761dfd4f
+--- /dev/null
++++ b/tests/slice/sdl2-minify.c
+@@ -0,0 +1,129 @@
++/* SLICE ui/sdl2-2d.c fn sdl2_2d_minify sdl2_2d_update
++ * PKG sdl2
++ * CFLAGS -Wall -Werror
++ */
++#define SDL_MAIN_HANDLED
++#include <SDL.h>
++#include <assert.h>
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++typedef struct {
++    int unused;
++} DisplayChangeListener;
++
++typedef struct {
++    int width, height;
++    uint32_t pixels[128 * 96];
++} DisplaySurface;
++
++struct sdl2_console {
++    DisplayChangeListener dcl;
++    DisplaySurface *surface;
++    SDL_Renderer *real_renderer;
++    SDL_Texture *texture;
++    SDL_Window *real_window;
++    bool opengl;
++};
++
++#define container_of(p, t, m) ((t *)((char *)(p) - offsetof(t, m)))
++#define surface_width(s) ((s)->width)
++#define surface_height(s) ((s)->height)
++#define surface_bytes_per_pixel(s) 4
++#define surface_stride(s) ((s)->width * 4)
++#define surface_data(s) ((uint8_t *)(s)->pixels)
++
++/* SDL only defines readback before presentation. */
++static void capture(SDL_Renderer *renderer);
++#define SDL_RenderPresent capture
++#include "slice.h"
++#undef SDL_RenderPresent
++
++static uint32_t output[128 * 96];
++static int output_width, output_height;
++
++static void capture(SDL_Renderer *renderer)
++{
++    int logical_width, logical_height;
++
++    assert(!SDL_GetRenderTarget(renderer));
++    assert(SDL_GetRendererOutputSize(renderer, &output_width, &output_height) == 0);
++    assert(output_width * output_height <= (int)(sizeof(output) / sizeof(output[0])));
++    /* Read the entire output, including pixels outside the logical viewport. */
++    SDL_RenderGetLogicalSize(renderer, &logical_width, &logical_height);
++    assert(SDL_RenderSetLogicalSize(renderer, 0, 0) == 0);
++    SDL_Rect bounds = {0, 0, output_width, output_height};
++    assert(SDL_RenderReadPixels(renderer, &bounds, SDL_PIXELFORMAT_ARGB8888,
++                                output, output_width * 4) == 0);
++    assert(SDL_RenderSetLogicalSize(renderer, logical_width, logical_height) == 0);
++    SDL_RenderPresent(renderer);
++}
++
++static void check(struct sdl2_console *scon, int width, int height, int period)
++{
++    DisplaySurface *surface = scon->surface;
++    SDL_SetWindowSize(scon->real_window, width, height);
++    SDL_PumpEvents();
++    assert(SDL_RenderSetLogicalSize(scon->real_renderer, surface->width,
++                                    surface->height) == 0);
++    /* One white column in each group. Vary the phase to catch lost strokes. */
++    for (int phase = 0; phase < period; phase++) {
++        for (int y = 0; y < surface->height; y++) {
++            for (int x = 0; x < surface->width; x++) {
++                surface->pixels[y * surface->width + x] =
++                    x % period == phase ? 0xffffffff : 0xff000000;
++            }
++        }
++        sdl2_2d_update(&scon->dcl, 0, 0, surface->width, surface->height);
++        assert(output_width == width && output_height == height);
++        int left = (width - surface->width / period) / 2;
++        int top = (height - surface->height / period) / 2;
++        for (int y = 0; y < height; y++) {
++            for (int x = 0; x < width; x++) {
++                int expected = x < left || x >= width - left ||
++                               y < top || y >= height - top ? 0 : 255 / period;
++                uint32_t rgb = output[y * width + x];
++                for (int shift = 0; shift < 24; shift += 8) {
++                    int value = (rgb >> shift) & 255;
++                    assert(abs(value - expected) <= 2);
++                }
++            }
++        }
++    }
++}
++
++int main(void)
++{
++    SDL_SetMainReady();
++    assert(SDL_setenv("SDL_VIDEODRIVER", "dummy", 1) == 0);
++    assert(SDL_Init(SDL_INIT_VIDEO) == 0);
++    assert(SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear"));
++    DisplaySurface surface = { .width = 128, .height = 96 };
++    struct sdl2_console scon = { .surface = &surface };
++    scon.real_window = SDL_CreateWindow("", 0, 0, 128, 96,
++                                        SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE);
++    assert(scon.real_window);
++    scon.real_renderer = SDL_CreateRenderer(scon.real_window, -1, SDL_RENDERER_SOFTWARE);
++    assert(scon.real_renderer);
++    scon.texture = SDL_CreateTexture(scon.real_renderer, SDL_PIXELFORMAT_ARGB8888,
++                                     SDL_TEXTUREACCESS_STREAMING, 128, 96);
++    assert(scon.texture);
++    check(&scon, 48, 24, 4);  /* side bars */
++    check(&scon, 16, 24, 8);  /* top and bottom bars */
++    check(&scon, 64, 48, 2);  /* direct bilinear path */
++    /* A portrait guest surface replaces the cached landscape targets. */
++    SDL_DestroyTexture(scon.texture);
++    surface.width = 96;
++    surface.height = 128;
++    scon.texture = SDL_CreateTexture(scon.real_renderer, SDL_PIXELFORMAT_ARGB8888,
++                                     SDL_TEXTUREACCESS_STREAMING, 96, 128);
++    assert(scon.texture);
++    check(&scon, 40, 32, 4);
++    SDL_DestroyRenderer(scon.real_renderer);
++    SDL_DestroyWindow(scon.real_window);
++    SDL_Quit();
++    return 0;
++}

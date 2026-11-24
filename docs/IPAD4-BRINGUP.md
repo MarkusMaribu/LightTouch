@@ -48,7 +48,7 @@ Set `QEMU_SRC` to the patched engine source checkout. On Windows, run the build 
   -serial "file:$OUT/serial.log" -d guest_errors,unimp -D "$OUT/mmio.log"
 ```
 
-The A6X device tree shares the A6 interrupt controller, Swift CPU architecture, and UART6 address. The port uses the D2018's I²C address and interrupt from the firmware. Its experimental eDP controller uses the shared QEMU DisplayPort sink and a 2048 × 1536 virtual panel. [QEMU-iOS A6 board notes](https://github.com/samhenrigold/qemu-ios/blob/main/docs/n42/README.md)
+The A6X device tree shares the A6 interrupt controller, Swift CPU architecture, and UART6 address. The port uses the D2018's I²C address and interrupt from the firmware. Its experimental eDP controller uses the shared QEMU DisplayPort sink and a 1536 × 2048 portrait panel. [QEMU-iOS A6 board notes](https://github.com/samhenrigold/qemu-ios/blob/main/docs/n42/README.md)
 
 In a Windows headless test, the stock kernel mounted `md0` and started `launchd` and `restored_external`. With disposable PPN media, the stock flash driver formatted the NAND, reported `VFL_Open [OK]` and `FTL_Open [OK]`, and published a 16 GB block device.
 
@@ -68,7 +68,10 @@ python3 scripts/ipad4.py prepare --ipsw "$IPSW" --device "$DEVICE" \
 python3 scripts/ipad4.py run --device "$DEVICE" --qemu "$QEMU" --bios "$QEMU_BIOS"
 ```
 
-The launcher defaults to SDL. Choose `--display cocoa` if the macOS engine was built with Cocoa. The `Home` key maps to the iPad's Home button.
+The launcher defaults to SDL. The SDL window fits the monitor at startup, and dragging an edge or corner scales the iPad display while keeping its aspect ratio. `Ctrl+Alt+F` toggles full screen. Choose `--display cocoa` if the macOS engine was built with Cocoa. The iPad wakes once if its display sleeps during startup. Click the sleep screen to wake it again. The `Home` key maps to the iPad's Home button.
+
+The iPad starts in portrait at 768 × 1024 for smoother scrolling. Add `--retina` to render at 1536 × 2048. Both modes use the iPad's 768 × 1024 point layout. Photo Booth opens and draws its effect picker. Its live previews are currently unavailable on Windows.
+
 `--offline-setup` seeds iOS 6's Setup Assistant and factory activation preferences for the virtual device.
 `--silent-audio` moves the iOS `VirtualAudio` plug-in outside its discovery directory on the generated System volume. This avoids the audio session startup timeout that can restart SpringBoard. The launcher runs with host audio disabled.
 The restore command checks the IPSW hash and every System record's checksum, reads back the final record and compares the Data keybag before and after a remount.
@@ -108,4 +111,15 @@ The temporary ramdisk uses signing options for the locally built restore helper.
   -m 1G -display none -monitor none -audio driver=none -no-reboot -serial "file:$OUT/normal.log"
 ```
 
-The installed System starts stock `launchd`, and both volumes mount. A cold boot loads the Data keybag. Windows tests verified the 2048 × 1536 lock screen, a drag to unlock, and a tap on the Home screen that opened Settings.
+The installed System starts stock `launchd`, and both volumes mount. A cold boot loads the Data keybag. Windows tests verified the 1536 × 2048 lock screen, a drag to unlock, and a tap on the Home screen that opened Photo Booth. The Windows package leaves camera emulation off, so Photo Booth's previews are blank.
+
+### Windows launcher
+
+From the repository root, build the launcher with a 64-bit MinGW-w64 toolchain.
+
+```sh
+windres Windows/ipad4/launcher.rc -o launcher.res.o
+gcc -O2 -municode -mwindows Windows/ipad4/launcher.c launcher.res.o -o LightTouch-iPad4.exe
+```
+
+Place the EXE beside the prepared `device` folder and a `runtime` folder containing the engine as `qemu-system-arm-display.exe`, its DLLs, and `pc-bios`. Double-click it for the 768 × 1024 panel. Pass `--retina` for native iPad 4 resolution.

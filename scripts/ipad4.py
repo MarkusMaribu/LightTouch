@@ -25,8 +25,12 @@ def engine(args, boot, nand, display, log, *, restore_stream=None):
     machine = f"iPad-4-wifi,kboot={qemu_value(boot)},ppn=on,nand={qemu_value(nand)}"
     if restore_stream is not None:
         machine += f",restore-image={qemu_value(restore_stream)}"
+    else:
+        machine += ",retina=on" if args.retina else ",retina=off"
     if display != "none":
-        machine += ",display-probe=on,quiet-boot=on"
+        machine += ",display-probe=on,quiet-boot=on,wake-on-boot=on"
+    if display == "sdl":
+        display = "sdl,show-cursor=on"
     return [
         str(args.qemu), "-L", str(args.bios), "-M", machine,
         "-m", "1G", "-display", display, "-monitor", "none",
@@ -124,6 +128,11 @@ def main():
                               help="Keep the iOS VirtualAudio plug-in outside the guest's audio plug-in directory")
     prepare_args.add_argument("--timeout", type=int, default=1200, help="Restore timeout in seconds")
     run_args.add_argument("--display", choices=("none", "sdl", "cocoa"), default="sdl")
+    panel = run_args.add_mutually_exclusive_group()
+    panel.add_argument("--retina", action="store_true", help="Render at 1536 by 2048 pixels")
+    panel.add_argument("--low-resolution", dest="retina", action="store_false",
+                       help="Render at 768 by 1024 pixels (default)")
+    run_args.set_defaults(retina=False)
     args = parser.parse_args()
     try:
         (prepare if args.command == "prepare" else run)(args)

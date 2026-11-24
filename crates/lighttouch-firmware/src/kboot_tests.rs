@@ -139,7 +139,7 @@ fn p101_boot_uses_a6x_memory_and_native_panel() {
 
     assert_eq!(img.load_pa, 0x8000_0000);
     assert_eq!(img.entry_pa, 0x8000_1040);
-    assert_eq!(video(&img), [2048 * 4, 2048, 1536, 32 | 1 << 16]);
+    assert_eq!(video(&img), [1536 * 4, 1536, 2048, 32 | 1 << 16]);
     assert_eq!(word(&dt, "chosen", "chip-id"), Some(0x8955));
     assert_eq!(dt.value("chosen", "random-seed"), Some(vec![0; 64]));
     assert_eq!(word(&dt, flash, "boot-from-nand"), Some(1));
