@@ -106,4 +106,4 @@ The temporary ramdisk uses signing options for the locally built restore helper.
   -m 1G -display none -monitor none -audio driver=none -no-reboot -serial "file:$OUT/normal.log"
 ```
 
-The installed System starts stock `launchd`, and both volumes mount. The corrected A6 DMA compatibility settings let a cold boot load the Data keybag. Windows tests captured the iOS first-boot progress screen and the lock screen with its setup slider at 2048 × 1536. The Home screen is unverified.
+The installed System starts stock `launchd`, and both volumes mount. A cold boot loads the Data keybag. Windows tests captured the iOS first-boot progress screen and the 2048 × 1536 lock screen. With `--offline-setup`, the lock screen displays “slide to unlock,” and the native touch driver receives drag input. A timeout in the media service can restart SpringBoard. Reaching the Home screen and launching apps are still unverified.
