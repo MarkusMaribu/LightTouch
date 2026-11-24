@@ -22,13 +22,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments,
     (void)previous;
     (void)show_command;
 
-    const wchar_t *panel_option = L",retina=off";
+    const wchar_t *panel_option = L",retina=on";
     if (arguments && *arguments) {
-        if (wcscmp(arguments, L"--retina") == 0) {
-            panel_option = L",retina=on";
-        } else if (wcscmp(arguments, L"--low-resolution") != 0) {
-            return show_error(L"Launch normally for 768 by 1024, or use "
-                              L"--retina for 1536 by 2048.", 2);
+        if (wcscmp(arguments, L"--low-resolution") == 0) {
+            panel_option = L",retina=off";
+        } else if (wcscmp(arguments, L"--retina") != 0) {
+            return show_error(L"Launch normally for the scalable Retina display. "
+                              L"--low-resolution selects the experimental 1x panel.", 2);
         }
     }
 

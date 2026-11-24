@@ -868,7 +868,7 @@ index f94c7d9642..17c5cdc842 100644
          if (request != 8 && request < 12)
              return 1;
 diff --git a/hw/arm/s5l8950.c b/hw/arm/s5l8950.c
-index 547b8bd0af..0d09896c8e 100644
+index 547b8bd0af..5e098c5e1f 100644
 --- a/hw/arm/s5l8950.c
 +++ b/hw/arm/s5l8950.c
 @@ -21,6 +21,7 @@
@@ -1338,7 +1338,7 @@ index 547b8bd0af..0d09896c8e 100644
              DeviceState *port = qdev_new(TYPE_S5L8930_I2S);
              qdev_prop_set_bit(port, "audio-out", i == 0);
              qdev_prop_set_uint8(port, "port", i);
-@@ -1599,23 +1833,34 @@ static void a6_init(MachineState *machine)
+@@ -1599,33 +1833,44 @@ static void a6_init(MachineState *machine)
          sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                             qemu_allocate_irq(a6_irq, s, 18 + i));
      }
@@ -1383,7 +1383,23 @@ index 547b8bd0af..0d09896c8e 100644
 +        }
      }
      if (s->tristar_probe) {
-         /* Original N42 DT: i2c0/tristar reg=0x1a. */
+-        /* Original N42 DT: i2c0/tristar reg=0x1a. */
++        /* Both boards place TriStar at address 0x1a on I2C0. */
+         I2CSlave *tristar = i2c_slave_new("a6.tristar-registers", 0x1a);
++        unsigned interrupt_pin = s->p101 ? 39 : 31;
+         i2c_slave_realize_and_unref(tristar, s->i2c[0]->bus, &error_fatal);
+-        /* N42 DT GPIO31, native cfg204: active-high level interrupt.
+-         * An absent accessory has no pending status. The GPIO model's
+-         * default high is appropriate for older active-low devices only. */
+-        s5l8930_gpio_set_rest_level(gpio, 31, false);
+-        qdev_connect_gpio_out(DEVICE(tristar), 0, qdev_get_gpio_in(gpio, 31));
++        /* The interrupt line is low until the controller signals a change. */
++        s5l8930_gpio_set_rest_level(gpio, interrupt_pin, false);
++        qdev_connect_gpio_out(DEVICE(tristar), 0,
++                              qdev_get_gpio_in(gpio, interrupt_pin));
+     }
+     if (s->usb_host_probe) {
+         /* N42's DT advertises the A4 PHY and S5L8900 device-controller
 @@ -1659,7 +1904,7 @@ static void a6_init(MachineState *machine)
          sysbus_connect_irq(SYS_BUS_DEVICE(host), 0,
                             qemu_allocate_irq(a6_irq, s, 12));

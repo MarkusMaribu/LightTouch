@@ -129,10 +129,10 @@ def main():
     prepare_args.add_argument("--timeout", type=int, default=1200, help="Restore timeout in seconds")
     run_args.add_argument("--display", choices=("none", "sdl", "cocoa"), default="sdl")
     panel = run_args.add_mutually_exclusive_group()
-    panel.add_argument("--retina", action="store_true", help="Render at 1536 by 2048 pixels")
+    panel.add_argument("--retina", action="store_true", help="Render at 1536 by 2048 pixels (default)")
     panel.add_argument("--low-resolution", dest="retina", action="store_false",
-                       help="Render at 768 by 1024 pixels (default)")
-    run_args.set_defaults(retina=False)
+                       help="Experimental 768 by 1024 panel. Some iPad 4 artwork is Retina-only.")
+    run_args.set_defaults(retina=True)
     args = parser.parse_args()
     try:
         (prepare if args.command == "prepare" else run)(args)

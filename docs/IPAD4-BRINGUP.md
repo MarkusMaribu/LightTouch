@@ -70,7 +70,7 @@ python3 scripts/ipad4.py run --device "$DEVICE" --qemu "$QEMU" --bios "$QEMU_BIO
 
 The launcher defaults to SDL. The SDL window fits the monitor at startup, and dragging an edge or corner scales the iPad display while keeping its aspect ratio. `Ctrl+Alt+F` toggles full screen. Choose `--display cocoa` if the macOS engine was built with Cocoa. The iPad wakes once if its display sleeps during startup. Click the sleep screen to wake it again. The `Home` key maps to the iPad's Home button.
 
-The iPad starts in portrait at 768 × 1024 for smoother scrolling. Add `--retina` to render at 1536 × 2048. Both modes use the iPad's 768 × 1024 point layout. Photo Booth opens and draws its effect picker. Its live previews are currently unavailable on Windows.
+The iPad starts in portrait at 1536 × 2048 with a 768 × 1024 point layout. Resize the window for a smaller picture. iOS still uses its Retina artwork. The experimental `--low-resolution` option changes the guest panel to 768 × 1024. The iPad 4 firmware omits 1x versions of some icons and controls, which appear blank in that mode. Photo Booth opens and draws its effect picker. Its live previews are currently unavailable on Windows.
 
 `--offline-setup` seeds iOS 6's Setup Assistant and factory activation preferences for the virtual device.
 `--silent-audio` moves the iOS `VirtualAudio` plug-in outside its discovery directory on the generated System volume. This avoids the audio session startup timeout that can restart SpringBoard. The launcher runs with host audio disabled.
@@ -113,6 +113,8 @@ The temporary ramdisk uses signing options for the locally built restore helper.
 
 The installed System starts stock `launchd`, and both volumes mount. A cold boot loads the Data keybag. Windows tests verified the 1536 × 2048 lock screen, a drag to unlock, and a tap on the Home screen that opened Photo Booth. The Windows package leaves camera emulation off, so Photo Booth's previews are blank.
 
+On a separate test device with the stock VirtualAudio plug-in, enabling `audio-ports-probe=on,tristar-probe=on,ae2-probe=on,camera=on` lets the iOS media service start. The virtual front camera delivers 1280 × 960 frames. Photo Booth requests an OpenGL ES 2 context to draw its effects. Context creation returns nil on the Windows engine. Core Video then rejects texture-cache creation with error −6661 and Photo Booth exits. Keep camera emulation off for this build.
+
 ### Windows launcher
 
 From the repository root, build the launcher with a 64-bit MinGW-w64 toolchain.
@@ -122,4 +124,4 @@ windres Windows/ipad4/launcher.rc -o launcher.res.o
 gcc -O2 -municode -mwindows Windows/ipad4/launcher.c launcher.res.o -o LightTouch-iPad4.exe
 ```
 
-Place the EXE beside the prepared `device` folder and a `runtime` folder containing the engine as `qemu-system-arm-display.exe`, its DLLs, and `pc-bios`. Double-click it for the 768 × 1024 panel. Pass `--retina` for native iPad 4 resolution.
+Place the EXE beside the prepared `device` folder and a `runtime` folder containing the engine as `qemu-system-arm-display.exe`, its DLLs, and `pc-bios`. Double-click the EXE for a resizable Retina window.
