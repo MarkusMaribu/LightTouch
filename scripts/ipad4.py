@@ -63,6 +63,10 @@ def prepare(args):
         if args.offline_setup:
             firmwarekit("hfs-grow", system, system.stat().st_size + (32 << 20))
             firmwarekit("seed-data", "--system", system, "--offline-setup")
+        if args.silent_audio:
+            firmwarekit("hfs-edit", system,
+                        "mv:/Library/Audio/Plug-Ins/HAL/VirtualAudio.plugin="
+                        "/Library/Audio/Plug-Ins/VirtualAudio.plugin")
         firmwarekit("extract-rootfs", decrypted / "048-2666-005-ramdisk.dmg", ramdisk)
         firmwarekit("hfs-grow", ramdisk, 67108864)
         firmwarekit("hfs-edit", ramdisk, "rm:/usr/local/bin/restored_external",
@@ -116,6 +120,8 @@ def main():
     prepare_args.add_argument("--initializer", type=absolute, required=True)
     prepare_args.add_argument("--offline-setup", action="store_true",
                               help="Prepare the virtual iPad for local use with Setup Assistant completed")
+    prepare_args.add_argument("--silent-audio", action="store_true",
+                              help="Keep the iOS VirtualAudio plug-in outside the guest's audio plug-in directory")
     prepare_args.add_argument("--timeout", type=int, default=1200, help="Restore timeout in seconds")
     run_args.add_argument("--display", choices=("none", "sdl", "cocoa"), default="sdl")
     args = parser.parse_args()

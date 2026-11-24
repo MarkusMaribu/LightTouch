@@ -63,12 +63,14 @@ Python 3.11 or later can run the full restore and launch sequence. Use a new dir
 
 ```sh
 python3 scripts/ipad4.py prepare --ipsw "$IPSW" --device "$DEVICE" \
-  --initializer "$INITIALIZER" --qemu "$QEMU" --bios "$QEMU_BIOS"
+  --initializer "$INITIALIZER" --qemu "$QEMU" --bios "$QEMU_BIOS" \
+  --offline-setup --silent-audio
 python3 scripts/ipad4.py run --device "$DEVICE" --qemu "$QEMU" --bios "$QEMU_BIOS"
 ```
 
 The launcher defaults to SDL. Choose `--display cocoa` if the macOS engine was built with Cocoa. The `Home` key maps to the iPad's Home button.
-Pass `--offline-setup` to `prepare` to seed iOS 6's Setup Assistant and factory activation preferences for the virtual device.
+`--offline-setup` seeds iOS 6's Setup Assistant and factory activation preferences for the virtual device.
+`--silent-audio` moves the iOS `VirtualAudio` plug-in outside its discovery directory on the generated System volume. This avoids the audio session startup timeout that can restart SpringBoard. The launcher runs with host audio disabled.
 The restore command checks the IPSW hash and every System record's checksum, reads back the final record and compares the Data keybag before and after a remount.
 The device directory holds the writable virtual NAND, boot bundle and serial logs.
 
@@ -106,4 +108,4 @@ The temporary ramdisk uses signing options for the locally built restore helper.
   -m 1G -display none -monitor none -audio driver=none -no-reboot -serial "file:$OUT/normal.log"
 ```
 
-The installed System starts stock `launchd`, and both volumes mount. A cold boot loads the Data keybag. Windows tests captured the iOS first-boot progress screen and the 2048 × 1536 lock screen. With `--offline-setup`, the lock screen displays “slide to unlock,” and the native touch driver receives drag input. A timeout in the media service can restart SpringBoard. Reaching the Home screen and launching apps are still unverified.
+The installed System starts stock `launchd`, and both volumes mount. A cold boot loads the Data keybag. Windows tests verified the 2048 × 1536 lock screen, a drag to unlock, and a tap on the Home screen that opened Settings.

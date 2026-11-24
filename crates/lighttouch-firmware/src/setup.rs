@@ -419,6 +419,7 @@ pub fn finished_setup(major: u32, language: &str, locale: &str, now: i64) -> Vec
             buddy.insert(if major == 5 { "AppleIDPresented" } else { "AppleIDPB3Presented" }.into(), t());
             if major == 6 {
                 buddy.insert("SetupVersion".into(), 3.into());
+                buddy.insert("AssistantPresented".into(), t());
             }
             buddy_local = plistedit::dictionary([("LocationServicesPresented", t())]);
             off = plistedit::dictionary([("LocationServicesEnabled", 0.into())]);
@@ -706,7 +707,7 @@ pub(crate) mod tests {
             ]);
             buddy.extend(match major {
                 5 => set(&["AppleIDPresented"]),
-                6 => set(&["AppleIDPB3Presented", "SetupVersion"]),
+                6 => set(&["AppleIDPB3Presented", "AssistantPresented", "SetupVersion"]),
                 _ => set(&["AppleIDPB5Presented", "PasscodePresented", "SetupVersion", "SetupState", "AppleIDForceUpgrade"]),
             });
             assert_eq!(keys(PURPLE_BUDDY), buddy, "{major}");
