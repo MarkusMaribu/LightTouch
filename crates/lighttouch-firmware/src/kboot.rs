@@ -21,6 +21,7 @@
 //! Boards too: the iPhone 3GS (N88) and the S5L8922 iPod touch 3G (N18), each with its own platform-name/chip-id, a
 //! 320x480 panel and the iPad's clock table cut to its DT's 32 slots; N18 gets the NOR graft, N88 keeps its own NOR and
 //! has its baseband node's identity filled with test values.
+use crate::a6_storage;
 use crate::devicetree::{self, DeviceTree, Value};
 use crate::error::Result;
 use crate::identity::UnitIdentity;
@@ -154,8 +155,9 @@ const NAND: [(&str, u32); 30] = [
 const NAND_NODES: [&str; 2] = ["arm-io/flash-controller0", "arm-io/flash-controller0/disk"];
 /// The two-bank virtual PPN chip implemented by the A6-family engine.
 const A6_PPN: &[(&str, u32)] = &[
-    ("#ce", 2), ("#die-ce", 2), ("#ce-blocks", 2128), ("#block-pages", 256),
-    ("#page-bytes", 16_384), ("#spare-bytes", 64), ("#databus", 2),
+    ("#ce", 2), ("#die-ce", 2), ("#ce-blocks", a6_storage::BLOCKS_PER_CHIP),
+    ("#block-pages", a6_storage::PAGES_PER_BLOCK), ("#page-bytes", a6_storage::PAGE_BYTES),
+    ("#spare-bytes", a6_storage::SPARE_BYTES), ("#databus", 2),
     ("max-transaction-size", 128), ("ce-bitmap", 0x101), ("ppn-device", 1),
     ("ppn-spec-version", 0x10505), ("ppn-ftl-ver", 2), ("caus-ce", 2),
     ("blocks-cau", 1064), ("cau-bits", 4), ("block-bits", 11), ("page-bits", 8),

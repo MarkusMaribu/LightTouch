@@ -24,6 +24,8 @@
 //!                         [--region LL] [--now SECS] [--jailbreak DIR]   the data-volume seeds on an image
 //!   firmwarekit fit-survey --system IMG --guest-tools DIR --recipe k48|n72 [--kernel FILE] [--commit]
 //!   firmwarekit kboot --decrypted DIR (--identity JSON | --seed S) --out FILE [--ramdisk FILE] [--boot-args S]
+//!   firmwarekit a6-nand OUT_DIR
+//!   firmwarekit a6-stream SYSTEM_HFS OUT_FILE
 //!   firmwarekit k48-iboot --catalog FILE --id ID --ipsw FILE --decrypted DIR --out DIR [--seed S] [--boot-args S]
 use lighttouch_firmware::entry::Entry;
 use lighttouch_firmware::hfs::{Editor, Volume};
@@ -530,6 +532,17 @@ fn kboot(args: &[String]) -> Result<(), String> {
     kboot::write(&dec, &PathBuf::from(&out), &identity, &boot_args, ramdisk.as_deref(), None).map_err(|e| e.to_string())
 }
 
+fn a6_nand(args: &[String]) -> Result<(), String> {
+    let [out] = args else { return Err("a6-nand OUT_DIR".into()) };
+    lighttouch_firmware::a6_storage::create_factory(std::path::Path::new(out)).map_err(|e| e.to_string())
+}
+
+fn a6_stream(args: &[String]) -> Result<(), String> {
+    let [system, out] = args else { return Err("a6-stream SYSTEM_HFS OUT_FILE".into()) };
+    lighttouch_firmware::a6_storage::write_restore_stream(std::path::Path::new(system), std::path::Path::new(out))
+        .map_err(|e| e.to_string())
+}
+
 fn k48_iboot(args: &[String]) -> Result<(), String> {
     use lighttouch_firmware::{identity::UnitIdentity, k48iboot, kboot};
     let entry = Entry::load_from_catalog(&PathBuf::from(required(args, "--catalog")?), &required(args, "--id")?)
@@ -586,6 +599,8 @@ fn main() -> ExitCode {
         Some("seed-data") => seed_data(&args[1..]),
         Some("fit-survey") => fit_survey::run(&args[1..]),
         Some("kboot") => kboot(&args[1..]),
+        Some("a6-nand") => a6_nand(&args[1..]),
+        Some("a6-stream") => a6_stream(&args[1..]),
         Some("k48-iboot") => k48_iboot(&args[1..]),
         _ => {
             eprintln!("usage: firmwarekit decrypt --catalog FILE --id ID --ipsw FILE --out DIR [--no-rootfs]");

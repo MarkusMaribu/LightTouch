@@ -24,6 +24,7 @@
 //!   kboot      the direct-kernel boot bundle (kboot.bin);  k48iboot  the iPad's real-iBoot chain (gid blobs, NOR)
 //!   sandbox_patch  the jailbroken kernel's sandbox patch and the kernelcache re-wrap;  rootfs_patch  the 7.x rootfs
 //!              remount patch
+pub mod a6_storage;
 pub mod activation;
 pub mod assets;
 pub mod boot;

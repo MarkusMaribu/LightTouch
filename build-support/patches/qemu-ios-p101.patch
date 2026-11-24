@@ -1,12 +1,45 @@
+diff --git a/configs/devices/arm-softmmu/lighttouch-a6.mak b/configs/devices/arm-softmmu/lighttouch-a6.mak
+new file mode 100644
+index 0000000000..81b03c5d04
+--- /dev/null
++++ b/configs/devices/arm-softmmu/lighttouch-a6.mak
+@@ -0,0 +1,8 @@
++# The iPad and iPod models provide the A6 machines' shared devices.
++CONFIG_IPOD_TOUCH_2G=y
++CONFIG_IPOD_TOUCH_1G=y
++CONFIG_IPAD1=y
++CONFIG_PL080=y
++CONFIG_PFLASH_CFI02=y
++CONFIG_FRAMEBUFFER=y
++CONFIG_SSI=y
+diff --git a/contrib/it-restore/build.sh b/contrib/it-restore/build.sh
+index 93b12a60d7..4d72d9e29a 100755
+--- a/contrib/it-restore/build.sh
++++ b/contrib/it-restore/build.sh
+@@ -13,7 +13,11 @@ trap 'rm -rf "$OBJ"' EXIT
+ cc6 "$HERE/../armv6-toolchain/crt1old.c" "$OBJ/start.o" -D_FORTIFY_SOURCE=0
+ cc6 "$HERE/restore.c" "$OBJ/restore.o" -D_FORTIFY_SOURCE=0 -isystem "$(xcrun clang -print-resource-dir)/include"
+ cc6 "$HERE/restore.c" "$OBJ/initial.o" -DIT_INITIAL_PREPARE=1 -D_FORTIFY_SOURCE=0 -isystem "$(xcrun clang -print-resource-dir)/include"
+-cc6 "$HERE/data.c" "$OBJ/data.o" '-DA6_PREPARED_DATA_SEED="/usr/local/share/qemu/data-seed"' -D_FORTIFY_SOURCE=0 -isystem "$(xcrun clang -print-resource-dir)/include"
++data_flags=()
++if [ "${RESTORE_STOCK_DATA_ONLY:-0}" != 1 ]; then
++    data_flags+=('-DA6_PREPARED_DATA_SEED="/usr/local/share/qemu/data-seed"')
++fi
++cc6 "$HERE/data.c" "$OBJ/data.o" "${data_flags[@]}" -D_FORTIFY_SOURCE=0 -isystem "$(xcrun clang -print-resource-dir)/include"
+ cc6 "$HERE/mobilegestalt-parent.c" "$OBJ/mobilegestalt.o" -D_FORTIFY_SOURCE=0 -isystem "$(xcrun clang -print-resource-dir)/include"
+ cc6 "$HERE/mobilegestalt-worker.c" "$OBJ/mobilegestalt-worker.o" -D_FORTIFY_SOURCE=0 -isystem "$(xcrun clang -print-resource-dir)/include"
+ link6 -execute "$OUT/it_mobilegestalt" "$OBJ/mobilegestalt-worker.o" "$OBJ/start.o" -e _start
 diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
-index 82117d1b3b..242481b1af 100644
+index 82117d1b3b..8fb959ef0f 100644
 --- a/hw/arm/Kconfig
 +++ b/hw/arm/Kconfig
-@@ -705,6 +705,7 @@ config IPAD1
+@@ -705,6 +705,9 @@ config IPAD1
      select IPOD_TOUCH_USB
      select EXYNOS4
      select IOS_BASEBAND
 +    select USB_OHCI_SYSBUS
++    select DDC
++    select DPCD
  
  config IPOD_TOUCH_2G
       bool
@@ -295,6 +328,53 @@ index aed0c70175..07a23b6f3b 100644
          }
          if (!panics) {
              continue;
+diff --git a/hw/arm/meson.build b/hw/arm/meson.build
+index 8392f6b92d..273aa0dbb3 100644
+--- a/hw/arm/meson.build
++++ b/hw/arm/meson.build
+@@ -95,7 +95,8 @@ arm_common_ss.add(when: 'CONFIG_XEN', if_true: files(
+ 
+ arm_ss.add(when: 'CONFIG_IPAD1', if_true: files('ipad1.c', 's5l8930_dmc.c', 's5l8930_pmgr.c', 's5l8930_gpio.c', 's5l8930_iop.c', 's5l8930_iop_core.c', 's5l8930_sdio.c', 's5l8930_i2c.c', 's5l8930_display.c', 's5l8930_dart.c', 's5l8930_cdma.c', 's5l8930_bbspi.c', 's5l8930_h2fmi.c', 's5l8930_sha1.c', 's5l8930_ltc4099.c', 's5l8930_hdq.c', 's5l8930_i2s.c', 's5l8930_isp.c', 's5l8940_isp.c', 'img_topaz.c', 'img_topaz_h264.c'))
+ arm_ss.add(when: 'CONFIG_IPAD1', if_true: files('s5l8920.c', 's5l8920_pmgr.c', 's5l8920_dart.c', 's5l8920_pwm.c', 's5l8920_vxd.c', 's5l8920_vxd_h264.c', 's5l8920_jpeg.c'))
+-arm_ss.add(when: 'CONFIG_IPAD1', if_true: files('s5l8950.c', 'cs42l65.c', 'cs35l19.c'))
++arm_ss.add(when: 'CONFIG_IPAD1', if_true: files('s5l8950.c', 's5l8955_edp.c',
++                                            'cs42l65.c', 'cs35l19.c'))
+ # Synopsys DWC OTG device core, PHY register file and host TCP bridge: shared by the S5L8720 and S5L8930 machines.
+ arm_ss.add(when: 'CONFIG_IPOD_TOUCH_1G', if_true: files('ipod_touch_1g.c', 's5l8900_fmc.c', 's5l8900_nand_ecc.c', 's5l8900_adm.c', 's5l8900_lcd_panel.c', 's5l8900_multitouch_z1.c', 'ipod_touch_wm8758.c', 'ipod_touch_piezo.c'))
+ # The NAND image store: the S5L8900 FMC's, the S5L8720 FMSS's and the S5L8930 IOP's files.
+diff --git a/hw/arm/s5l8930_cdma.c b/hw/arm/s5l8930_cdma.c
+index 3bfc3bdea4..5fa5c34dc8 100644
+--- a/hw/arm/s5l8930_cdma.c
++++ b/hw/arm/s5l8930_cdma.c
+@@ -175,6 +175,7 @@ struct S5L8930CDMAState {
+      * Opt-in only; never replace an unsupported operation with a success. */
+     bool skg_probe;
+     bool nand_file_aes;
++    bool skg_success_low_bit;
+     uint32_t secret_ctrl, secret_seed[8], skg_slot, skg_count, skg_control;
+     uint32_t skg_status;
+     uint8_t secret_key[8][32];
+@@ -1321,9 +1322,10 @@ static void aes_write(void *opaque, hwaddr offset, uint64_t value,
+             s->skg_control = v;
+             if (v == 1) {
+                 s->secret_valid &= ~(1u << 7);
+-                s->skg_status |= aes_skg_candidate(s) ? 2 : 1;
++                bool success = aes_skg_candidate(s);
++                s->skg_status |= success == s->skg_success_low_bit ? 1 : 2;
+             } else if (v) {
+-                s->skg_status |= 1;
++                s->skg_status |= s->skg_success_low_bit ? 2 : 1;
+             }
+             return;
+         case 0x430: s->skg_status &= ~(v & 3); return;
+@@ -1566,6 +1568,7 @@ static const Property s5l8930_cdma_properties[] = {
+     DEFINE_PROP_UINT8("version", S5L8930CDMAState, version, 2),
+     DEFINE_PROP_BOOL("a6", S5L8930CDMAState, a6, false),
+     DEFINE_PROP_BOOL("skg-probe", S5L8930CDMAState, skg_probe, false),
++    DEFINE_PROP_BOOL("skg-success-low-bit", S5L8930CDMAState, skg_success_low_bit, false),
+     /* Legacy page-store images omit all inline NAND encryption. A6's native
+      * protected images retain their additional encrypted-file layer. */
+     DEFINE_PROP_BOOL("nand-file-aes", S5L8930CDMAState, nand_file_aes, false),
 diff --git a/hw/arm/s5l8930_iop.c b/hw/arm/s5l8930_iop.c
 index 91dc9d653e..5639411eb6 100644
 --- a/hw/arm/s5l8930_iop.c
@@ -333,7 +413,7 @@ index 91dc9d653e..5639411eb6 100644
  }
  
 diff --git a/hw/arm/s5l8950.c b/hw/arm/s5l8950.c
-index 547b8bd0af..b96a984c20 100644
+index 547b8bd0af..23408e4955 100644
 --- a/hw/arm/s5l8950.c
 +++ b/hw/arm/s5l8950.c
 @@ -53,6 +53,7 @@
@@ -344,7 +424,20 @@ index 547b8bd0af..b96a984c20 100644
  OBJECT_DECLARE_SIMPLE_TYPE(S5L8950State, S5L8950_MACHINE)
  #define A6_RAM_BASE 0x80000000ULL
  #define A6_RAM_SIZE 0x40000000ULL
-@@ -239,6 +240,7 @@ struct S5L8950State {
+@@ -102,6 +103,12 @@ static void a6_mouse_event(void *opaque, int x, int y, int z, int buttons)
+     }
+ }
+ 
++static void p101_mouse_event(void *opaque, int x, int y, int z, int buttons)
++{
++    /* The landscape framebuffer is rotated relative to the portrait sensor. */
++    a6_mouse_event(opaque, y, x, z, buttons);
++}
++
+ /* A5/A6 use the PA Semi command-FIFO I2C block, rather than A4's block.
+  * Register/command definitions are cross-checked against Linux's
+  * drivers/i2c/busses/i2c-pasemi-core.c and the original N42 driver traffic. */
+@@ -239,6 +246,7 @@ struct S5L8950State {
      char *usb_tcp_addr; /* the host USB bridge (usbmuxd-qemu); unset: IT_USB_TCP */
      int restore_fd;
      uint64_t restore_size;
@@ -352,15 +445,16 @@ index 547b8bd0af..b96a984c20 100644
      bool ppn, display_probe, ae2_probe, pmu_adc_probe, tristar_probe,
          usb_host_probe;
      bool audio_ports_probe;
-@@ -262,6 +264,7 @@ struct S5L8950State {
+@@ -262,6 +270,8 @@ struct S5L8950State {
      unsigned unimplemented, unimplemented_iop;
      QemuConsole *console;
      uint32_t framebuffer;
 +    unsigned panel_width, panel_height;
++    MTSensorProfile touch_profile;
      GuestPackage pkg;
      GuestPasteboard pb;
      IPodAgent *agent;
-@@ -324,6 +327,21 @@ static void a6_wlan_reset(void *opaque, int pin, int level)
+@@ -324,6 +334,21 @@ static void a6_wlan_reset(void *opaque, int pin, int level)
   * Graphics uses the common host executor and request validation. The optional
   * factory-imaging transport supplies one read-only stream only when explicitly
   * configured; its writes use the guest's native block/FTL drivers. */
@@ -382,7 +476,7 @@ index 547b8bd0af..b96a984c20 100644
  static void a6_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
                           uint64_t value)
  {
-@@ -362,7 +380,7 @@ static void a6_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
+@@ -362,7 +387,7 @@ static void a6_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
          if (n && n <= 65536 && off <= s->restore_size &&
              n <= s->restore_size - off) {
              g_autofree uint8_t *buffer = g_malloc(n);
@@ -391,7 +485,7 @@ index 547b8bd0af..b96a984c20 100644
              if (count >= 0 && !guest_copy(cpu, q.args.ag.buffer_guest_ptr,
                                            buffer, count, true)) {
                  q.retval = count;
-@@ -395,12 +413,18 @@ static void a6_display_update(void *opaque)
+@@ -395,12 +420,18 @@ static void a6_display_update(void *opaque)
      if (!s->framebuffer)
          return;
      DisplaySurface *surface = qemu_console_surface(s->console);
@@ -413,7 +507,7 @@ index 547b8bd0af..b96a984c20 100644
  }
  static const GraphicHwOps a6_display_ops = {.gfx_update = a6_display_update};
  
-@@ -1331,8 +1355,9 @@ static void a6_reset(void *opaque)
+@@ -1331,8 +1362,9 @@ static void a6_reset(void *opaque)
      uint32_t arguments = ldl_le_p(trailer + 16),
               length = ldl_le_p(trailer + 20);
      if (length > size - 24 || load < A6_RAM_BASE ||
@@ -425,7 +519,7 @@ index 547b8bd0af..b96a984c20 100644
          exit(1);
      }
      if (s->quiet_boot &&
-@@ -1356,7 +1381,9 @@ static void a6_reset(void *opaque)
+@@ -1356,7 +1388,9 @@ static void a6_reset(void *opaque)
          a4_dt_edit((uint8_t *)data, length, load, arguments,
                     &(A4DTEdit){"isp", "compatible", "none", 5});
      }
@@ -436,7 +530,7 @@ index 547b8bd0af..b96a984c20 100644
      a6_reset_soc(s);
      guest_pkg_reset(&s->pkg);
      ipod_agent_reset(s->agent);
-@@ -1392,8 +1419,8 @@ static void a6_reset(void *opaque)
+@@ -1392,8 +1426,8 @@ static void a6_reset(void *opaque)
      cpu_set_pc(CPU(s->cpu[0]), entry);
      fprintf(
          stderr,
@@ -447,7 +541,7 @@ index 547b8bd0af..b96a984c20 100644
  }
  
  /* Use the existing native launchd halt RPC. The request itself is not proof
-@@ -1486,7 +1513,7 @@ static void a6_init(MachineState *machine)
+@@ -1486,7 +1520,7 @@ static void a6_init(MachineState *machine)
      gles_host_set_a6(true);
      if (s->restore_image) {
          struct stat st;
@@ -456,7 +550,7 @@ index 547b8bd0af..b96a984c20 100644
          if (s->restore_fd < 0 || fstat(s->restore_fd, &st) ||
              !S_ISREG(st.st_mode)) {
              error_report("Cannot open regular restore-image file");
-@@ -1495,7 +1522,8 @@ static void a6_init(MachineState *machine)
+@@ -1495,7 +1529,8 @@ static void a6_init(MachineState *machine)
          s->restore_size = st.st_size;
      }
      if (!s->kboot) {
@@ -466,46 +560,50 @@ index 547b8bd0af..b96a984c20 100644
          exit(1);
      }
      memory_region_init_ram(&s->ram, NULL, "a6.dram", A6_RAM_SIZE, &error_fatal);
-@@ -1539,21 +1567,23 @@ static void a6_init(MachineState *machine)
-     /* N42 DT spi1: 0x32100000, IRQ 29; multi-touch,n41 ATN is
-      * GPIO interrupt 201 (port 25, pin 1). The shared Samsung SPI model
-      * accepts the native C1F57 firmware's 64452-byte download burst. */
--    DeviceState *touch_spi = qdev_new(TYPE_IPOD_TOUCH_SPI);
+@@ -1536,25 +1571,32 @@ static void a6_init(MachineState *machine)
+     sysbus_mmio_map(SYS_BUS_DEVICE(gpio), 0, 0x3fa00000);
+     sysbus_connect_irq(SYS_BUS_DEVICE(gpio), 0,
+                        qemu_allocate_irq(a6_irq, s, 119));
+-    /* N42 DT spi1: 0x32100000, IRQ 29; multi-touch,n41 ATN is
+-     * GPIO interrupt 201 (port 25, pin 1). The shared Samsung SPI model
+-     * accepts the native C1F57 firmware's 64452-byte download burst. */
++    /* The P101 tree wires its Z2F13 digitizer to SPI3/GPIO203. Use the
++     * virtual iPad sensor geometry with P101.mtprops' firmware revision. */
+     DeviceState *touch_spi = qdev_new(TYPE_IPOD_TOUCH_SPI);
 -    qdev_prop_set_uint8(touch_spi, "index", 1);
--    qdev_prop_set_string(touch_spi, "peripheral", "multitouch");
--    qdev_prop_set_uint32(touch_spi, "tx-fifo-depth", 0x10000);
--    sysbus_realize_and_unref(SYS_BUS_DEVICE(touch_spi), &error_fatal);
++    unsigned touch_bus = s->p101 ? 3 : 1;
++    qdev_prop_set_uint8(touch_spi, "index", touch_bus);
+     qdev_prop_set_string(touch_spi, "peripheral", "multitouch");
+     qdev_prop_set_uint32(touch_spi, "tx-fifo-depth", 0x10000);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(touch_spi), &error_fatal);
 -    sysbus_mmio_map(SYS_BUS_DEVICE(touch_spi), 0, 0x32100000);
--    sysbus_connect_irq(SYS_BUS_DEVICE(touch_spi), 0,
++    sysbus_mmio_map(SYS_BUS_DEVICE(touch_spi), 0, 0x32000000 + touch_bus * 0x100000);
+     sysbus_connect_irq(SYS_BUS_DEVICE(touch_spi), 0,
 -                       qemu_allocate_irq(a6_irq, s, 29));
--    IPodTouchMultitouchState *mt = IPOD_TOUCH_SPI(touch_spi)->mt;
++                       qemu_allocate_irq(a6_irq, s, 28 + touch_bus));
+     IPodTouchMultitouchState *mt = IPOD_TOUCH_SPI(touch_spi)->mt;
 -    mt->profile = &a6_mt_profile;
--    mt->hold_atn = true;
--    qdev_connect_gpio_out_named(DEVICE(mt), "atn", 0,
++    if (s->p101) {
++        s->touch_profile = mt_profile_k48;
++        s->touch_profile.bcd_version = 0x160;
++        mt->profile = &s->touch_profile;
++    } else {
++        mt->profile = &a6_mt_profile;
++    }
+     mt->hold_atn = true;
+     qdev_connect_gpio_out_named(DEVICE(mt), "atn", 0,
 -                                qdev_get_gpio_in(gpio, 201));
 -    qemu_add_mouse_event_handler(a6_mouse_event, mt, 1, "iPhone 5 Touchscreen");
--    ipod_touch_multitouch_register_input(mt);
-+    if (!s->p101) {
-+        DeviceState *touch_spi = qdev_new(TYPE_IPOD_TOUCH_SPI);
-+        qdev_prop_set_uint8(touch_spi, "index", 1);
-+        qdev_prop_set_string(touch_spi, "peripheral", "multitouch");
-+        qdev_prop_set_uint32(touch_spi, "tx-fifo-depth", 0x10000);
-+        sysbus_realize_and_unref(SYS_BUS_DEVICE(touch_spi), &error_fatal);
-+        sysbus_mmio_map(SYS_BUS_DEVICE(touch_spi), 0, 0x32100000);
-+        sysbus_connect_irq(SYS_BUS_DEVICE(touch_spi), 0,
-+                           qemu_allocate_irq(a6_irq, s, 29));
-+        IPodTouchMultitouchState *mt = IPOD_TOUCH_SPI(touch_spi)->mt;
-+        mt->profile = &a6_mt_profile;
-+        mt->hold_atn = true;
-+        qdev_connect_gpio_out_named(DEVICE(mt), "atn", 0,
-+                                    qdev_get_gpio_in(gpio, 201));
-+        qemu_add_mouse_event_handler(a6_mouse_event, mt, 1, "iPhone 5 Touchscreen");
-+        ipod_touch_multitouch_register_input(mt);
-+    }
-     if (s->audio_ports_probe) {
++                                qdev_get_gpio_in(gpio, s->p101 ? 203 : 201));
++    qemu_add_mouse_event_handler(s->p101 ? p101_mouse_event : a6_mouse_event,
++                                 mt, 1, s->p101 ? "iPad 4 Touchscreen" : "iPhone 5 Touchscreen");
+     ipod_touch_multitouch_register_input(mt);
+-    if (s->audio_ports_probe) {
++    if (s->audio_ports_probe && !s->p101) {
          /* Original N42 DT: SPI3 uses the same spi-1,samsung controller
           * already used for touch. Its codec register-port protocol is
-@@ -1599,15 +1629,23 @@ static void a6_init(MachineState *machine)
+          * qualified separately in the CS42L65 model. */
+@@ -1599,15 +1641,23 @@ static void a6_init(MachineState *machine)
          sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                             qemu_allocate_irq(a6_irq, s, 18 + i));
      }
@@ -537,7 +635,7 @@ index 547b8bd0af..b96a984c20 100644
      if (s->backlight_probe) {
          I2CSlave *backlight = i2c_slave_new("a6.backlight-registers", 0x63);
          i2c_slave_realize_and_unref(backlight, s->i2c[0]->bus, &error_fatal);
-@@ -1659,7 +1697,7 @@ static void a6_init(MachineState *machine)
+@@ -1659,7 +1709,7 @@ static void a6_init(MachineState *machine)
          sysbus_connect_irq(SYS_BUS_DEVICE(host), 0,
                             qemu_allocate_irq(a6_irq, s, 12));
          qemu_add_machine_init_done_notifier(&a6_remote_wake_notifier);
@@ -546,7 +644,7 @@ index 547b8bd0af..b96a984c20 100644
              s5l8930_gpio_set_rest_level(gpio, 211, false);
              s5l8930_gpio_set_rest_level(gpio, 57, false);
              qdev_connect_gpio_out(gpio, 17,
-@@ -1669,7 +1707,7 @@ static void a6_init(MachineState *machine)
+@@ -1669,7 +1719,7 @@ static void a6_init(MachineState *machine)
              qdev_connect_gpio_out_named(s->pmu, "gpio", 10,
                                          qemu_allocate_irq(a6_wlan_reset, s, 0));
          }
@@ -555,7 +653,7 @@ index 547b8bd0af..b96a984c20 100644
              DeviceState *bb = qdev_new(TYPE_IOS_BASEBAND);
              USBDevice *modem = USB_DEVICE(qdev_new("usb-mdm9x15"));
  
-@@ -1726,7 +1764,7 @@ static void a6_init(MachineState *machine)
+@@ -1726,7 +1776,7 @@ static void a6_init(MachineState *machine)
              sysbus_connect_irq(SYS_BUS_DEVICE(modem_uart), 0,
                                 qemu_allocate_irq(a6_irq, s, 0x16));
          }
@@ -564,19 +662,59 @@ index 547b8bd0af..b96a984c20 100644
              host = qdev_new(TYPE_SYSBUS_OHCI);
              qdev_prop_set_uint32(host, "num-ports", 1);
              sysbus_realize_and_unref(SYS_BUS_DEVICE(host), &error_fatal);
-@@ -1859,7 +1897,7 @@ static void a6_init(MachineState *machine)
-         sysbus_connect_irq(SYS_BUS_DEVICE(isp), 0,
-                            qemu_allocate_irq(a6_irq, s, 7));
-     }
--    if (s->display_probe) {
-+    if (s->display_probe && !s->p101) {
-         /* H5P shares the pipe's UI address/stride, packet FIFO and basic
-          * CLCD ENVID/size registers with H3. This probe reuses those modeled
-          * blocks while qualifying the additional H5P register/IRQ contract.
-@@ -1898,6 +1936,11 @@ static void a6_init(MachineState *machine)
-         sysbus_mmio_map(SYS_BUS_DEVICE(dsi), 0, 0x39500000);
-         sysbus_connect_irq(SYS_BUS_DEVICE(dsi), 0,
-                            qemu_allocate_irq(a6_irq, s, 41));
+@@ -1773,6 +1823,12 @@ static void a6_init(MachineState *machine)
+     qdev_prop_set_uint32(cdma, "num-channels", A6_CDMA_CHANNELS);
+     qdev_prop_set_uint8(cdma, "version", 5);
+     qdev_prop_set_bit(cdma, "nand-file-aes", true);
++    if (s->p101) {
++        /* The P101 restore requests UIDPlus when creating its system keybag. */
++        qdev_prop_set_bit(cdma, "skg-probe", true);
++        /* 10B329's CDMA polls status bit 0 for success and bit 1 for failure. */
++        qdev_prop_set_bit(cdma, "skg-success-low-bit", true);
++    }
+     if (s->audio_ports_probe) {
+         qdev_prop_set_uint32(cdma, "paced-base", 0x34190000);
+         qdev_prop_set_uint32(cdma, "paced-ports", 8);
+@@ -1866,9 +1922,9 @@ static void a6_init(MachineState *machine)
+          * It is not yet a claim of complete A6 display hardware support. */
+         DeviceState *display = qdev_new(TYPE_S5L8930_DISPLAY);
+         qdev_prop_set_bit(display, "h5p", true);
+-        qdev_prop_set_uint64(display, "fb-base", 0xbf700000);
+-        qdev_prop_set_uint16(display, "width", 640);
+-        qdev_prop_set_uint16(display, "height", 1136);
++        qdev_prop_set_uint64(display, "fb-base", s->p101 ? 0xbf3fc000 : 0xbf700000);
++        qdev_prop_set_uint16(display, "width", s->panel_width);
++        qdev_prop_set_uint16(display, "height", s->panel_height);
+         sysbus_realize_and_unref(SYS_BUS_DEVICE(display), &error_fatal);
+         sysbus_mmio_map(SYS_BUS_DEVICE(display), 0, 0x3a100000);
+         sysbus_mmio_map(SYS_BUS_DEVICE(display), 1, 0x39200000);
+@@ -1889,15 +1945,25 @@ static void a6_init(MachineState *machine)
+          * 0x39500000, IRQ 41. The native AppleSamsungMIPIDSIController uses
+          * the shared STATUS/CLKCTRL/PKTHDR register contract. The second
+          * DT window (0x3f110000) is the separate, unmodeled SAC block. */
+-        DeviceState *dsi = qdev_new(TYPE_IPOD_TOUCH_MIPI_DSI);
+-        IPOD_TOUCH_MIPI_DSI(dsi)->hs_clock_at_reset = true;
+-        qdev_prop_set_uint32(dsi, "lanes", 4);
+-        qdev_prop_set_uint32(dsi, "panel-id", 0x00a1d13c);
+-        qdev_prop_set_uint32(dsi, "panel-id-len", 4);
+-        sysbus_realize_and_unref(SYS_BUS_DEVICE(dsi), &error_fatal);
+-        sysbus_mmio_map(SYS_BUS_DEVICE(dsi), 0, 0x39500000);
+-        sysbus_connect_irq(SYS_BUS_DEVICE(dsi), 0,
+-                           qemu_allocate_irq(a6_irq, s, 41));
++        if (s->p101) {
++            sysbus_create_simple("s5l8955.edp", 0x39500000,
++                                  qemu_allocate_irq(a6_irq, s, 144));
++        } else {
++            DeviceState *dsi = qdev_new(TYPE_IPOD_TOUCH_MIPI_DSI);
++            IPOD_TOUCH_MIPI_DSI(dsi)->hs_clock_at_reset = true;
++            qdev_prop_set_uint32(dsi, "lanes", 4);
++            qdev_prop_set_uint32(dsi, "panel-id", 0x00a1d13c);
++            qdev_prop_set_uint32(dsi, "panel-id-len", 4);
++            sysbus_realize_and_unref(SYS_BUS_DEVICE(dsi), &error_fatal);
++            sysbus_mmio_map(SYS_BUS_DEVICE(dsi), 0, 0x39500000);
++            sysbus_connect_irq(SYS_BUS_DEVICE(dsi), 0,
++                               qemu_allocate_irq(a6_irq, s, 41));
++        }
 +    } else {
 +        s->console = graphic_console_init(NULL, 0, &a6_display_ops, s);
 +        qemu_console_resize(s->console, s->panel_width, s->panel_height);
@@ -585,7 +723,7 @@ index 547b8bd0af..b96a984c20 100644
          /* Original N42 scaler/dart-nrt compatibility includes the shared
           * Samsung M2 and S5L8930 DART interfaces. Mapper-scaler uses SIDs 2/3;
           * the existing scaler model consumes SID 2. Its reported 0x20007 is
-@@ -1927,9 +1970,6 @@ static void a6_init(MachineState *machine)
+@@ -1927,9 +1993,6 @@ static void a6_init(MachineState *machine)
              ipod_scaler_set_iommu(scaler, a6_scaler_xlate, dart, 2);
              ipod_scaler_set_version(scaler, 0x20007);
          }
@@ -595,7 +733,7 @@ index 547b8bd0af..b96a984c20 100644
      }
      qemu_register_reset(a6_reset, s);
      qemu_register_powerdown_notifier(&a6_powerdown_notifier);
-@@ -2121,7 +2161,7 @@ void s5l8950_press_button(IPodTouchButton button, bool down)
+@@ -2121,7 +2184,7 @@ void s5l8950_press_button(IPodTouchButton button, bool down)
      S5L8950State *s = (S5L8950State *)object_dynamic_cast(
          OBJECT(qdev_get_machine()), TYPE_S5L8950_MACHINE);
  
@@ -604,7 +742,7 @@ index 547b8bd0af..b96a984c20 100644
          return;
      }
      bool was_down = s->button_down[button];
-@@ -2243,22 +2283,25 @@ static void a6_set_quiet_boot(Object *obj, bool value, Error **errp)
+@@ -2243,22 +2306,25 @@ static void a6_set_quiet_boot(Object *obj, bool value, Error **errp)
  static void a6_instance_init(Object *obj)
  {
      S5L8950State *s = S5L8950_MACHINE(obj);
@@ -640,14 +778,19 @@ index 547b8bd0af..b96a984c20 100644
      S5L8950_MACHINE(obj)->agent = ipod_agent_new();
      ipod_agent_publish(S5L8950_MACHINE(obj)->agent);
      object_property_add_str(obj, "agent-request", NULL, a6_set_agent_request);
-@@ -2282,6 +2325,17 @@ static const TypeInfo a6_machine = {
+@@ -2282,6 +2348,22 @@ static const TypeInfo a6_machine = {
      .instance_init = a6_instance_init,
      .instance_finalize = a6_instance_finalize,
  };
 +
 +static void p101_class_init(ObjectClass *klass, const void *data)
 +{
-+    MACHINE_CLASS(klass)->desc = "iPad 4 Wi-Fi (P101AP, S5L8955/A6X, bring-up)";
++    MachineClass *mc = MACHINE_CLASS(klass);
++
++    /* QEMU initializes a separate compat property array for each machine type. */
++    compat_props_add(mc->compat_props, a6_device_defaults,
++                     G_N_ELEMENTS(a6_device_defaults));
++    mc->desc = "iPad 4 Wi-Fi (P101AP, S5L8955/A6X, bring-up)";
 +}
 +
 +static const TypeInfo p101_machine = {
@@ -658,7 +801,7 @@ index 547b8bd0af..b96a984c20 100644
  /* D1972 register interface with an opt-in ADC experiment. The original N42
   * driver starts conversions with register 48 bit 5 and consumes the completion
   * at event register 2 bit 5 (80bdc86c..c8de). Its result unpacking at
-@@ -2294,6 +2348,7 @@ typedef struct A6PMU {
+@@ -2294,6 +2376,7 @@ typedef struct A6PMU {
      uint8_t regs[256], reg;
      unsigned log_count;
      bool address;
@@ -666,7 +809,7 @@ index 547b8bd0af..b96a984c20 100644
      bool adc_probe;
      bool thermal_sensors;
      bool battery_swi;
-@@ -2414,12 +2469,12 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
+@@ -2414,12 +2497,12 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
              current_cpu ? CPU_GET_CLASS(current_cpu)->get_pc(current_cpu) : 0);
          /* bounded: uint8_t reg addresses the 256-byte register file. */
          s->regs[reg] = data;
@@ -681,16 +824,23 @@ index 547b8bd0af..b96a984c20 100644
              /* Original D1972: hibernate uses B0=80 then 1B|=2;
               * standby (80bdf914) uses 1B|=1 after flash shutdown.
               * Both rail commands are consumed, not persistent bits. */
-@@ -2433,7 +2488,7 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
+@@ -2433,7 +2516,14 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
                  a6_pmu_set_ap_power(s, false);
              }
          }
 -        if (reg == 0x99 && (data & 0x29) == 0x29) {
++        /* P101's native shutdown reaches D2018 register 0x1f after
++         * AppleNANDFTL completes its shutdown. Bit 0 commands standby. */
++        if (s->d2018 && reg == 0x1f && (data & 1)) {
++            s->regs[reg] &= ~1;
++            qatomic_set(&a6_guest_shutdown, 1);
++            qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
++        }
 +        if (!s->d2018 && reg == 0x99 && (data & 0x29) == 0x29) {
              /* Original D1972 halt with VBUS writes B0=90, then uses
               * restart 99|=29 to enter iBoot's off-but-charging state.
               * As on the A4 PMU, this is a completed guest shutdown,
-@@ -2478,9 +2533,9 @@ static uint8_t a6_pmu_recv(I2CSlave *dev)
+@@ -2478,9 +2568,9 @@ static uint8_t a6_pmu_recv(I2CSlave *dev)
       * VBUS, then 80be1f4e checks A bit6 for a selected/valid source;
       * 80be415c uses B bits1/2 for the charging phase.
       * This fixed virtual supply complements the full HDQ battery. */
@@ -702,7 +852,7 @@ index 547b8bd0af..b96a984c20 100644
          value = (value & ~0x06) | (s->usb_power ? 0x02 : 0);
      }
      if (s->battery_swi && reg == 0x0c) {
-@@ -2565,6 +2620,18 @@ static const TypeInfo a6_pmu_type = {
+@@ -2565,6 +2655,18 @@ static const TypeInfo a6_pmu_type = {
      .instance_finalize = a6_pmu_finalize,
  };
  
@@ -721,7 +871,7 @@ index 547b8bd0af..b96a984c20 100644
  /* Initial no-accessory TriStar register qualification fixture. The original
   * N42 13A344 AppleTHS7383::start reads register 0x0f as one byte and publishes
   * it as TriStar REV; the byte is not an acceptance test. Revision zero names
-@@ -2774,9 +2841,11 @@ static const TypeInfo a6_i2c_type = {
+@@ -2774,9 +2876,11 @@ static const TypeInfo a6_i2c_type = {
  static void a6_register_types(void)
  {
      type_register_static(&a6_pmu_type);
@@ -733,6 +883,201 @@ index 547b8bd0af..b96a984c20 100644
 +    type_register_static(&p101_machine);
  }
  type_init(a6_register_types)
+diff --git a/hw/arm/s5l8955_edp.c b/hw/arm/s5l8955_edp.c
+new file mode 100644
+index 0000000000..130994fc50
+--- /dev/null
++++ b/hw/arm/s5l8955_edp.c
+@@ -0,0 +1,189 @@
++/*
++ * S5L8955 embedded DisplayPort transmitter for the virtual iPad panel.
++ * The Analogix AUX register layout is shared with Samsung Exynos.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "qemu/module.h"
++#include "qapi/error.h"
++#include "hw/core/irq.h"
++#include "hw/core/sysbus.h"
++#include "hw/display/dpcd.h"
++#include "hw/display/i2c-ddc.h"
++#include "hw/misc/auxbus.h"
++
++#define TYPE_S5L8955_EDP "s5l8955.edp"
++OBJECT_DECLARE_SIMPLE_TYPE(S5L8955EDPState, S5L8955_EDP)
++
++enum {
++    INT_STATUS = 0x3dc / 4,
++    INT_MASK = 0x3f8 / 4,
++    SYS_CTL_1 = 0x600 / 4,
++    SYS_CTL_3 = 0x608 / 4,
++    DEBUG_CTL = 0x6c0 / 4,
++    AUX_STATUS = 0x780 / 4,
++    AUX_REPLY = 0x78c / 4,
++    AUX_BUFFER_CTL = 0x790 / 4,
++    AUX_COMMAND = 0x794 / 4,
++    AUX_ADDR_LOW = 0x798 / 4,
++    AUX_ADDR_MID = 0x79c / 4,
++    AUX_ADDR_HIGH = 0x7a0 / 4,
++    AUX_START = 0x7a4 / 4,
++    AUX_BUFFER = 0x7c0 / 4,
++};
++
++struct S5L8955EDPState {
++    SysBusDevice parent_obj;
++    MemoryRegion mmio;
++    qemu_irq irq;
++    AUXBus *aux;
++    uint32_t regs[0x2000 / 4];
++};
++
++static void edp_update_irq(S5L8955EDPState *s)
++{
++    qemu_set_irq(s->irq, !!(s->regs[INT_STATUS] & s->regs[INT_MASK]));
++}
++
++static void edp_aux_transfer(S5L8955EDPState *s, bool address_only)
++{
++    uint32_t cmd = s->regs[AUX_COMMAND];
++    uint32_t addr = (s->regs[AUX_ADDR_LOW] & 0xff) |
++                    ((s->regs[AUX_ADDR_MID] & 0xff) << 8) |
++                    ((s->regs[AUX_ADDR_HIGH] & 0xf) << 16);
++    uint8_t data[16] = {0};
++    unsigned length = address_only ? 0 : ((cmd >> 4) & 0xf) + 1;
++    AUXReply reply;
++
++    for (unsigned i = 0; i < length; i++) {
++        data[i] = s->regs[AUX_BUFFER + i];
++    }
++    reply = aux_request(s->aux, cmd & 0xf, addr, length, data);
++    for (unsigned i = 0; i < length; i++) {
++        s->regs[AUX_BUFFER + i] = data[i];
++    }
++    s->regs[AUX_BUFFER_CTL] = length;
++    s->regs[AUX_REPLY] = reply;
++    s->regs[AUX_STATUS] = reply ? 1 : 0;
++    s->regs[INT_STATUS] |= reply ? 1 : 2;
++    edp_update_irq(s);
++}
++
++static uint64_t edp_read(void *opaque, hwaddr off, unsigned size)
++{
++    S5L8955EDPState *s = opaque;
++    return s->regs[off / 4];
++}
++
++static void edp_write(void *opaque, hwaddr off, uint64_t value, unsigned size)
++{
++    S5L8955EDPState *s = opaque;
++    unsigned reg = off / 4;
++
++    switch (reg) {
++    case INT_STATUS:
++        s->regs[reg] &= ~value;
++        edp_update_irq(s);
++        break;
++    case INT_MASK:
++        s->regs[reg] = value;
++        edp_update_irq(s);
++        break;
++    case AUX_BUFFER_CTL:
++        if (value & 0x80) {
++            memset(&s->regs[AUX_BUFFER], 0, 16 * sizeof(uint32_t));
++            s->regs[reg] = 0;
++        }
++        break;
++    case AUX_START:
++        s->regs[reg] = value & ~1u;
++        if (value & 1) {
++            edp_aux_transfer(s, value & 2);
++        }
++        break;
++    case SYS_CTL_1:
++        s->regs[reg] = value | (1u << 2); /* input clock detected */
++        break;
++    case SYS_CTL_3:
++        s->regs[reg] = value | (1u << 6) | (1u << 2); /* HPD and stream valid */
++        break;
++    case DEBUG_CTL:
++        s->regs[reg] = value | (1u << 4); /* PLL locked */
++        break;
++    default:
++        s->regs[reg] = value;
++        break;
++    }
++}
++
++static const MemoryRegionOps edp_ops = {
++    .read = edp_read,
++    .write = edp_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 4, .max_access_size = 4 },
++    .impl = { .min_access_size = 4, .max_access_size = 4 },
++};
++
++static void edp_init(Object *obj)
++{
++    S5L8955EDPState *s = S5L8955_EDP(obj);
++    SysBusDevice *dev = SYS_BUS_DEVICE(obj);
++
++    s->aux = aux_bus_init(DEVICE(obj), "aux");
++    memory_region_init_io(&s->mmio, obj, &edp_ops, s, TYPE_S5L8955_EDP, 0x2000);
++    sysbus_init_mmio(dev, &s->mmio);
++    sysbus_init_irq(dev, &s->irq);
++}
++
++static void edp_realize(DeviceState *dev, Error **errp)
++{
++    S5L8955EDPState *s = S5L8955_EDP(dev);
++    DeviceState *dpcd = qdev_new(TYPE_DPCD);
++    I2CSlave *edid = i2c_slave_new(TYPE_I2CDDC, 0x50);
++    I2CDDCState *ddc = I2CDDC(edid);
++    qemu_edid_info info = {
++        .prefx = 2048,
++        .prefy = 1536,
++        .width_mm = 197,
++        .height_mm = 148,
++    };
++
++    aux_bus_realize(s->aux);
++    qdev_realize_and_unref(dpcd, BUS(s->aux), &error_fatal);
++    aux_map_slave(AUX_SLAVE(dpcd), 0);
++    qemu_edid_generate(ddc->edid_blob, sizeof(ddc->edid_blob), &info);
++    i2c_slave_realize_and_unref(edid, aux_get_i2c_bus(s->aux), &error_fatal);
++}
++
++static void edp_reset(DeviceState *dev)
++{
++    S5L8955EDPState *s = S5L8955_EDP(dev);
++
++    memset(s->regs, 0, sizeof(s->regs));
++    s->regs[SYS_CTL_1] = 1u << 2;
++    s->regs[SYS_CTL_3] = (1u << 6) | (1u << 2);
++    s->regs[DEBUG_CTL] = 1u << 4;
++    edp_update_irq(s);
++}
++
++static void edp_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->realize = edp_realize;
++    device_class_set_legacy_reset(dc, edp_reset);
++}
++
++static const TypeInfo edp_type = {
++    .name = TYPE_S5L8955_EDP,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(S5L8955EDPState),
++    .instance_init = edp_init,
++    .class_init = edp_class_init,
++};
++
++static void edp_register_types(void)
++{
++    type_register_static(&edp_type);
++}
++type_init(edp_register_types)
 diff --git a/hw/misc/ios_baseband_core.c b/hw/misc/ios_baseband_core.c
 index 29f91179ef..228334a2ba 100644
 --- a/hw/misc/ios_baseband_core.c

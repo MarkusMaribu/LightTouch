@@ -39,6 +39,8 @@ Both recorded on a Pixel 10. Click to watch on YouTube.
 
 ## Getting started
 
+The fourth-generation Wi-Fi iPad on iOS 6.1.3 has an experimental command-line boot path. [iPad 4 bring-up and verification](docs/IPAD4-BRINGUP.md)
+
 Install the APK on Android, or unpack the build for your computer, and choose **Get started**. Pick a device and iOS version, and LightTouch downloads iOS and prepares it (the iPod touch 2G on iOS 3.1.3 takes about a minute). You don't need any files of your own; if you already have the IPSW, you can choose it instead of downloading. The iPod touch 1G and 2G and the original iPhone also need a boot file, which LightTouch downloads for you. [docs/ASSETS.md](docs/ASSETS.md) says where everything comes from.
 
 Then start the device. Use the on-screen Home, Sleep/Wake and volume buttons, and **Stop** to shut iOS down cleanly. Each device keeps its own storage, and the prepared system is never changed.
