@@ -59,6 +59,20 @@ With the engine's 32-bit iOS build toolchain configured, set `RESTORE_STOCK_DATA
 `contrib/it-restore/build.sh` to build a helper that copies the stock Data seed directly from System.
 Set `INITIALIZER` to the path of that built binary.
 
+Python 3.11 or later can run the full restore and launch sequence. Use a new directory for `DEVICE`.
+
+```sh
+python3 scripts/ipad4.py prepare --ipsw "$IPSW" --device "$DEVICE" \
+  --initializer "$INITIALIZER" --qemu "$QEMU" --bios "$QEMU_BIOS"
+python3 scripts/ipad4.py run --device "$DEVICE" --qemu "$QEMU" --bios "$QEMU_BIOS"
+```
+
+The launcher defaults to SDL. Choose `--display cocoa` if the macOS engine was built with Cocoa. The `Home` key maps to the iPad's Home button.
+The restore command checks the IPSW hash and every System record's checksum, reads back the final record and compares the Data keybag before and after a remount.
+The device directory holds the writable virtual NAND, boot bundle and serial logs.
+
+For individual preparation steps, use FirmwareKit directly.
+
 ```sh
 "$FWKIT" decrypt --catalog Portable/firmware/firmware-catalog.json --id p101ap-10B329 \
   --ipsw "$IPSW" --out "$OUT/decrypted"
@@ -70,14 +84,15 @@ cp "$OUT/restore.hfs" "$OUT/initialize.hfs"
 "$FWKIT" hfs-edit "$OUT/initialize.hfs" 'rm:/usr/local/bin/restored_external' \
   "write:/usr/local/bin/restored_external=$INITIALIZER" 'chmod:/usr/local/bin/restored_external=0755'
 "$FWKIT" kboot --decrypted "$OUT/decrypted" --seed p101ap-10B329 \
-  --ramdisk "$OUT/initialize.hfs" --boot-args '-v serial=3 debug=0x8 amfi_allow_any_signature=1 cs_enforcement_disable=1' \
+  --ramdisk "$OUT/initialize.hfs" \
+  --boot-args '-v serial=3 debug=0x8 nand-enable-reformat=1 amfi_allow_any_signature=1 cs_enforcement_disable=1' \
   --out "$OUT/initialize.kboot"
 "$QEMU" -L "$QEMU_BIOS" \
   -M "iPad-4-wifi,kboot=$OUT/initialize.kboot,ppn=on,nand=$OUT/nand,restore-image=$OUT/system.a6di" \
   -m 1G -display none -monitor none -audio driver=none -no-reboot -serial "file:$OUT/initialize.log"
 ```
 
-The helper writes through the native flash driver, verifies the System contents and provisions Data.
+The helper writes through the native flash driver and provisions Data.
 The tested restore logged `A6RESTORE DONE records=23284 bytes=1525833728` and a clean unmount of both volumes.
 The temporary ramdisk uses signing options for the locally built restore helper. A normal boot uses the original System image and omits those options.
 
@@ -89,4 +104,4 @@ The temporary ramdisk uses signing options for the locally built restore helper.
   -m 1G -display none -monitor none -audio driver=none -no-reboot -serial "file:$OUT/normal.log"
 ```
 
-The installed System starts stock `launchd`, and both volumes mount. The corrected A6 DMA compatibility settings let a cold boot load the Data keybag. The Windows headless test captured the native Apple boot logo at 2048 × 1536 and stayed up for 105 seconds. The Home screen is unverified.
+The installed System starts stock `launchd`, and both volumes mount. The corrected A6 DMA compatibility settings let a cold boot load the Data keybag. A clean Windows test captured the iOS first-boot progress screen at 2048 × 1536 and logged the start of Setup Assistant. The Home screen is unverified.
