@@ -60,6 +60,9 @@ def prepare(args):
         firmwarekit("decrypt", "--catalog", CATALOG, "--id", BUILD,
                     "--ipsw", args.ipsw, "--out", decrypted)
         firmwarekit("extract-rootfs", decrypted / "rootfs.dmg", system)
+        if args.offline_setup:
+            firmwarekit("hfs-grow", system, system.stat().st_size + (32 << 20))
+            firmwarekit("seed-data", "--system", system, "--offline-setup")
         firmwarekit("extract-rootfs", decrypted / "048-2666-005-ramdisk.dmg", ramdisk)
         firmwarekit("hfs-grow", ramdisk, 67108864)
         firmwarekit("hfs-edit", ramdisk, "rm:/usr/local/bin/restored_external",
@@ -111,6 +114,8 @@ def main():
     prepare_args.add_argument("--firmwarekit", type=absolute, default=ROOT / "target/debug" / default_firmwarekit)
     prepare_args.add_argument("--ipsw", type=absolute, required=True)
     prepare_args.add_argument("--initializer", type=absolute, required=True)
+    prepare_args.add_argument("--offline-setup", action="store_true",
+                              help="Prepare the virtual iPad for local use with Setup Assistant completed")
     prepare_args.add_argument("--timeout", type=int, default=1200, help="Restore timeout in seconds")
     run_args.add_argument("--display", choices=("none", "sdl", "cocoa"), default="sdl")
     args = parser.parse_args()

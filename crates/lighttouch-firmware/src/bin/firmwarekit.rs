@@ -20,7 +20,7 @@
 //!   firmwarekit write-n45-nand VOLUME OUT (--fil-id 0xN | --iboot FILE) [--banks N] [--bbt-map]
 //!   firmwarekit build-n72-nor --ipsw FILE --identity JSON --out FILE [--board B] [--types A,B] [--wrap all|A,B]
 //!   firmwarekit build-n45-nor --ipsw FILE --identity JSON --out FILE [--board B] [--boot-args S]
-//!   firmwarekit seed-data --system IMG [--var-root P] [--language TAG] [--keyboards A,B] [--skip-setup]
+//!   firmwarekit seed-data --system IMG [--var-root P] [--language TAG] [--keyboards A,B] [--skip-setup | --offline-setup]
 //!                         [--region LL] [--now SECS] [--jailbreak DIR]   the data-volume seeds on an image
 //!   firmwarekit fit-survey --system IMG --guest-tools DIR --recipe k48|n72 [--kernel FILE] [--commit]
 //!   firmwarekit kboot --decrypted DIR (--identity JSON | --seed S) --out FILE [--ramdisk FILE] [--boot-args S]
@@ -467,7 +467,7 @@ fn create(args: &[String]) -> ExitCode {
 /// The data-volume seeds (language and keyboards, Setup finished, 6.x assets) applied to an image, as create seeds
 /// /private/var; with --jailbreak, afc2 and Cydia from the bootstrap in DIR (downloaded there when missing) first.
 fn seed_data(args: &[String]) -> Result<(), String> {
-    use lighttouch_firmware::{assets, cydia, keyboards::KeyboardCatalog, plistedit, setup};
+    use lighttouch_firmware::{activation, assets, cydia, keyboards::KeyboardCatalog, plistedit, setup, system_edits};
     let e = |e: lighttouch_firmware::Error| e.to_string();
     let image = PathBuf::from(required(args, "--system")?);
     let var_root = option(args, "--var-root").unwrap_or_else(|| "private/var".into());
@@ -486,6 +486,10 @@ fn seed_data(args: &[String]) -> Result<(), String> {
     let field = |k: &str| version.get(k).and_then(plist::Value::as_string).unwrap_or("").to_string();
     let (product, build) = (field("ProductVersion"), field("ProductBuildVersion"));
     let major: u32 = product.split('.').next().and_then(|m| m.parse().ok()).unwrap_or(0);
+    let offline_setup = args.iter().any(|a| a == "--offline-setup");
+    if offline_setup && major != 6 {
+        return Err("--offline-setup requires the iOS 6 data-ark activation route".into());
+    }
     let catalog = KeyboardCatalog::read(&ed);
     let formats = setup::region_formats(&ed);
     let keyboards: Option<Vec<String>> = option(args, "--keyboards").map(|k| k.split(',').map(String::from).collect());
@@ -501,10 +505,26 @@ fn seed_data(args: &[String]) -> Result<(), String> {
     if let Some(l) = &language {
         eprintln!("language {}, region {}, keyboards {:?}", l.language, l.locale, l.keyboards);
     }
-    if args.iter().any(|a| a == "--skip-setup") && major >= 5 {
+    if (offline_setup || args.iter().any(|a| a == "--skip-setup")) && major >= 5 {
         let (l, locale) = language.as_ref().map_or(("en", "en_US"), |l| (l.language.as_str(), l.locale.as_str()));
         setup::seed_finished_setup(&mut ed, &var_root, major, l, locale, now).map_err(e)?;
         eprintln!("Setup Assistant: seeded as finished (iOS {major})");
+    }
+    if offline_setup {
+        let lockdownd = ed.read(system_edits::LOCKDOWND).map_err(e)?;
+        let keys = activation::data_ark_route(&lockdownd)
+            .and_then(|record| record.data_ark)
+            .ok_or("This lockdownd does not support the iOS 6 data-ark activation route")?;
+        let ark = std::path::Path::new(&var_root).join(setup::DATA_ARK);
+        let ark = ark.to_string_lossy().replace('\\', "/");
+        plistedit::seed(&mut ed, &ark, |record| {
+            for (key, value) in keys {
+                record.insert(key, value.into());
+            }
+            Ok(())
+        })
+        .map_err(e)?;
+        eprintln!("Seeded offline activation for the virtual device");
     }
     let region = option(args, "--region").unwrap_or_else(|| "LL".into());
     if let Some(installed) = assets::seed_preinstalled_assets(&mut ed, &var_root, major, &product, &build, &region).map_err(e)? {

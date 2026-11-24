@@ -68,6 +68,7 @@ python3 scripts/ipad4.py run --device "$DEVICE" --qemu "$QEMU" --bios "$QEMU_BIO
 ```
 
 The launcher defaults to SDL. Choose `--display cocoa` if the macOS engine was built with Cocoa. The `Home` key maps to the iPad's Home button.
+Pass `--offline-setup` to `prepare` to seed iOS 6's Setup Assistant and factory activation preferences for the virtual device.
 The restore command checks the IPSW hash and every System record's checksum, reads back the final record and compares the Data keybag before and after a remount.
 The device directory holds the writable virtual NAND, boot bundle and serial logs.
 
@@ -94,6 +95,7 @@ cp "$OUT/restore.hfs" "$OUT/initialize.hfs"
 
 The helper writes through the native flash driver and provisions Data.
 The tested restore logged `A6RESTORE DONE records=23284 bytes=1525833728` and a clean unmount of both volumes.
+A separate read-only pass through the same flash driver verified all 23,284 records against the stock image.
 The temporary ramdisk uses signing options for the locally built restore helper. A normal boot uses the original System image and omits those options.
 
 ```sh
@@ -104,4 +106,4 @@ The temporary ramdisk uses signing options for the locally built restore helper.
   -m 1G -display none -monitor none -audio driver=none -no-reboot -serial "file:$OUT/normal.log"
 ```
 
-The installed System starts stock `launchd`, and both volumes mount. The corrected A6 DMA compatibility settings let a cold boot load the Data keybag. A clean Windows test captured the iOS first-boot progress screen at 2048 × 1536 and logged the start of Setup Assistant. The Home screen is unverified.
+The installed System starts stock `launchd`, and both volumes mount. The corrected A6 DMA compatibility settings let a cold boot load the Data keybag. Windows tests captured the iOS first-boot progress screen and the lock screen with its setup slider at 2048 × 1536. The Home screen is unverified.
