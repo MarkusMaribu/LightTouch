@@ -28,6 +28,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments,
             panel_option = L",retina=off";
         } else if (wcscmp(arguments, L"--retina") != 0) {
             return show_error(L"Launch normally for the scalable Retina display. "
+                              L"Press F6 in the emulator to rotate the iPad. "
                               L"--low-resolution selects the experimental 1x panel.", 2);
         }
     }
