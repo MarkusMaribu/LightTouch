@@ -23,7 +23,7 @@
 //!   firmwarekit seed-data --system IMG [--var-root P] [--language TAG] [--keyboards A,B] [--skip-setup]
 //!                         [--region LL] [--now SECS] [--jailbreak DIR]   the data-volume seeds on an image
 //!   firmwarekit fit-survey --system IMG --guest-tools DIR --recipe k48|n72 [--kernel FILE] [--commit]
-//!   firmwarekit kboot --decrypted DIR --identity JSON --out FILE [--ramdisk FILE] [--boot-args S] [--sandbox-patch]
+//!   firmwarekit kboot --decrypted DIR (--identity JSON | --seed S) --out FILE [--ramdisk FILE] [--boot-args S]
 //!   firmwarekit k48-iboot --catalog FILE --id ID --ipsw FILE --decrypted DIR --out DIR [--seed S] [--boot-args S]
 use lighttouch_firmware::entry::Entry;
 use lighttouch_firmware::hfs::{Editor, Volume};
@@ -512,9 +512,18 @@ fn seed_data(args: &[String]) -> Result<(), String> {
 }
 
 fn kboot(args: &[String]) -> Result<(), String> {
-    use lighttouch_firmware::{identity::UnitIdentity, kboot};
+    use lighttouch_firmware::{devicetree::DeviceTree, identity::UnitIdentity, kboot};
     let dec = PathBuf::from(required(args, "--decrypted")?);
-    let identity = UnitIdentity::load(&PathBuf::from(required(args, "--identity")?)).map_err(|e| e.to_string())?;
+    let identity = match (option(args, "--identity"), option(args, "--seed")) {
+        (Some(path), None) => UnitIdentity::load(&PathBuf::from(path)),
+        (None, Some(seed)) => {
+            let bytes = std::fs::read(dec.join("DeviceTree.bin")).map_err(|e| e.to_string())?;
+            let tree = DeviceTree::new(&bytes).map_err(|e| e.to_string())?;
+            UnitIdentity::synthesize(&seed, "16g", Some(kboot::Board::of(&tree).model_number))
+        }
+        _ => return Err("specify exactly one of --identity JSON or --seed S".into()),
+    }
+    .map_err(|e| e.to_string())?;
     let boot_args = option(args, "--boot-args").unwrap_or_else(|| kboot::DEFAULT_BOOT_ARGS.into());
     let ramdisk = option(args, "--ramdisk").map(PathBuf::from);
     let out = required(args, "--out")?;

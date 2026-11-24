@@ -152,6 +152,18 @@ const NAND: [(&str, u32); 30] = [
 ];
 /// The nodes the geometry goes in: iBoot-1219 DTs carry it on flash-controller0 itself as well as on its disk.
 const NAND_NODES: [&str; 2] = ["arm-io/flash-controller0", "arm-io/flash-controller0/disk"];
+/// The two-bank virtual PPN chip implemented by the A6-family engine.
+const A6_PPN: &[(&str, u32)] = &[
+    ("#ce", 2), ("#die-ce", 2), ("#ce-blocks", 2128), ("#block-pages", 256),
+    ("#page-bytes", 16_384), ("#spare-bytes", 64), ("#databus", 2),
+    ("max-transaction-size", 128), ("ce-bitmap", 0x101), ("ppn-device", 1),
+    ("ppn-spec-version", 0x10505), ("ppn-ftl-ver", 2), ("caus-ce", 2),
+    ("blocks-cau", 1064), ("cau-bits", 4), ("block-bits", 11), ("page-bits", 8),
+    ("mlc-pages", 256), ("slc-pages", 128), ("toggle-device", 1),
+    ("logical-page-size", 4096), ("meta-per-logical-page", 16), ("valid-meta-per-logical-page", 16),
+    ("metadata-whitening", 0), ("read-setup-clks", 1), ("read-hold-clks", 1),
+    ("read-dccycle-clks", 1), ("write-setup-clks", 1), ("write-hold-clks", 1),
+];
 const MODEL: [(&str, &str); 2] = [("model-number", "MB292"), ("region-info", "LL/A")];
 
 /// One kboot board: what iBoot would put in its DT. (The machine that runs it is the emulator's.)
@@ -165,6 +177,8 @@ pub struct Board {
     pub model_number: &'static str,
     /// DRAM bytes: memSize, vram and pram sit at its top, as iBoot puts them.
     pub dram: u32,
+    pub physical_base: u32,
+    pub vram_size: u32,
     /// A radio board (N90) keeps its baseband node; the machine's `baseband` property unmatches it at boot.
     pub radio: bool,
     /// The machine answers the Bluetooth HCI on the UART the DT hangs the board's bluetooth node off (qemu-ios bt_uart),
@@ -209,6 +223,8 @@ impl Board {
             board_id,
             model_number,
             dram: DRAM_SIZE,
+            physical_base: PHYS_BASE,
+            vram_size: VRAM_SIZE,
             radio: false,
             bluetooth_hci: false,
             platform_name: "s5l8930x",
@@ -271,6 +287,20 @@ impl Board {
         Board { bluetooth_hci: true, platform_name: "s5l8922x", chip_id: 0x8922, ..Board::base(320, 480, 0, 1, 0x02, "MC008") }
     }
 
+    pub fn p101() -> Board {
+        Board {
+            dram: 0x4000_0000,
+            physical_base: 0x8000_0000,
+            vram_size: 0x00c0_0000,
+            platform_name: "s5l8955x",
+            chip_id: 0x8955,
+            clocks: vec![24_000_000; 96],
+            dot_pitch: Some(264),
+            chip_revision: 0x20,
+            ..Board::base(2048, 1536, 0, 2, 0, "MD510")
+        }
+    }
+
     /// By the catalog's board name (K48Recipe.a4): K48 for anything else.
     pub fn for_board(board: &str) -> Board {
         match board {
@@ -278,13 +308,18 @@ impl Board {
             "n90ap" => Board::n90(),
             "n88ap" => Board::n88(),
             "n18ap" => Board::n18(),
+            "p101ap" => Board::p101(),
             _ => Board::k48(),
         }
     }
 
     /// The S5L8920 family (-M n18, n88): no metadata whitening in its DTs, the IPSW's NAND epoch, no USB host.
     pub fn is_s5l8920(&self) -> bool {
-        self.platform_name != "s5l8930x"
+        matches!(self.chip_id, 0x8920 | 0x8922)
+    }
+
+    fn is_a6x(&self) -> bool {
+        self.chip_id == 0x8955
     }
 
     /// From the DT's compatible ("N81AP\0iPod4,1\0AppleARM" -> n81); K48 otherwise.
@@ -298,22 +333,23 @@ impl Board {
             "N90AP" => Board::n90(),
             "N88AP" => Board::n88(),
             "N18AP" => Board::n18(),
+            "P101AP" => Board::p101(),
             _ => Board::k48(),
         }
     }
 
     pub fn mem_size(&self) -> u32 {
-        self.dram - PRAM_SIZE - VRAM_SIZE
+        self.dram - PRAM_SIZE - self.vram_size
     }
 
     pub fn vram_pa(&self) -> u32 {
-        PHYS_BASE + self.mem_size()
+        self.physical_base + self.mem_size()
     }
 
     /// iBoot puts the A4's PRAM at the top of its 512 MiB DRAM window whatever the DRAM (0x5fffc000 on the 256 MiB iPad
     /// too, where the window mirrors DRAM); the S5L8920's at the top of its DRAM.
     pub fn pram_pa(&self) -> u32 {
-        PHYS_BASE + if self.is_s5l8920() { self.dram } else { 0x2000_0000 } - PRAM_SIZE
+        self.physical_base + if self.is_s5l8920() || self.is_a6x() { self.dram } else { 0x2000_0000 } - PRAM_SIZE
     }
 }
 
@@ -593,7 +629,7 @@ fn fill_dt(dt: &mut DeviceTree, memory_map: &[(String, u32, u32)], identity: &Un
         }
     }
     for (k, hz) in [
-        ("clock-frequency", CPU_HZ),
+        ("clock-frequency", if board.is_a6x() { 1_400_000_000 } else { CPU_HZ }),
         ("memory-frequency", MEM_HZ),
         ("bus-frequency", BUS_HZ),
         ("peripheral-frequency", PERIPH_HZ),
@@ -601,11 +637,14 @@ fn fill_dt(dt: &mut DeviceTree, memory_map: &[(String, u32, u32)], identity: &Un
         ("timebase-frequency", TIMEBASE_HZ),
     ] {
         dt.set("cpus/cpu0", k, Value::U32(hz))?;
+        if board.is_a6x() && dt.has("cpus/cpu1", k) {
+            dt.set("cpus/cpu1", k, Value::U32(hz))?;
+        }
     }
     let slots = dt.slot("arm-io", "clock-frequencies").map_or(board.clocks.len() * 4, |s| s.length) / 4;
     dt.set("arm-io", "clock-frequencies", Value::Words(board.clocks.iter().copied().take(slots).collect()))?;
     dt.set("arm-io", "usbphy-frequency", Value::U32(USBPHY_HZ))?;
-    if !board.is_s5l8920() {
+    if !board.is_s5l8920() && !board.is_a6x() {
         let bridge = hex::decode(A4_BRIDGE_SETTINGS).unwrap_or_default();
         if dt.slot("arm-io/pmgr", "bridge-settings").is_some_and(|s| s.length >= bridge.len()) {
             dt.set("arm-io/pmgr", "bridge-settings", Value::Bytes(bridge))?;
@@ -671,16 +710,19 @@ fn fill_dt(dt: &mut DeviceTree, memory_map: &[(String, u32, u32)], identity: &Un
     if dt.has("arm-io", "chip-revision") {
         dt.set("arm-io", "chip-revision", Value::U32(board.chip_revision))?;
     }
+    let geometry = if board.is_a6x() { A6_PPN } else { &NAND };
     for node in NAND_NODES {
-        let Some(props) = dt.props.get(node).cloned() else { continue };
-        for (k, v) in &NAND {
-            if props.contains_key(*k) {
+        for (k, v) in geometry {
+            if dt.has(node, k) {
                 dt.set(node, k, Value::U32(*v))?;
             }
         }
+        if board.is_a6x() && dt.has(node, "device-readid") {
+            dt.set(node, "device-readid", Value::Bytes(vec![0x50, 0x50, 0x4e, 1, 5, 5, 0, 0]))?;
+        }
     }
     dt.set("pram", "reg", Value::Words(vec![board.pram_pa(), PRAM_SIZE]))?;
-    dt.set("vram", "reg", Value::Words(vec![board.vram_pa(), VRAM_SIZE]))?;
+    dt.set("vram", "reg", Value::Words(vec![board.vram_pa(), board.vram_size]))?;
     for (i, (name, pa, size)) in memory_map.iter().enumerate() {
         dt.rename("chosen/memory-map", &format!("MemoryMapReserved-{i}"), name)?;
         dt.set("chosen/memory-map", name, Value::Words(vec![*pa, *size]))?;
@@ -699,10 +741,15 @@ pub fn build(kernel: &[u8], device_tree: &[u8], boot_args: &str, identity: &Unit
         return Err(crate::unsupported!("kernelcache has no segments"));
     };
     let vbase = (lowest & 0xF000_0000) as usize;
-    let pa = |va: usize| (va as i64 - vbase as i64 + PHYS_BASE as i64) as u32;
     let mut dt = DeviceTree::new(device_tree)?;
     let board = Board::of(&dt);
-    graft_nor(&mut dt)?;
+    let pa = |va: usize| (va as i64 - vbase as i64 + i64::from(board.physical_base)) as u32;
+    if board.is_a6x() {
+        // The stock tree has a two-byte iBoot placeholder. QEMU fills the expanded slot on every reset.
+        dt.replace("chosen", "random-seed", &[0; 64])?;
+    } else {
+        graft_nor(&mut dt)?;
+    }
     // Host nubs (EHCI, OHCI0) up at arbitrator start, next to device mode (qemu-ios docs/ipad1/usb-keyboard.md).
     if dt.contains("arm-io/usb-complex") {
         dt.add("arm-io/usb-complex", "hsic-enabled", &[])?;
@@ -719,6 +766,9 @@ pub fn build(kernel: &[u8], device_tree: &[u8], boot_args: &str, identity: &Unit
     let args_va = top + page(dt_len);
     let end_va = args_va + 0x1000;
     let top_of_kernel = pa((end_va + 0x3FFF) & !0x3FFF);
+    if end_va - vbase > board.mem_size() as usize {
+        return Err(crate::unsupported!("kernelcache, device tree and RAM disk exceed guest memory"));
+    }
 
     let mut image = vec![0u8; end_va - vbase];
     let mut memory_map: Vec<(String, u32, u32)> = Vec::new();
@@ -752,7 +802,7 @@ pub fn build(kernel: &[u8], device_tree: &[u8], boot_args: &str, identity: &Unit
     let mut ba = vec![1, 0, m.boot_args_version(), 0];
     ba.extend(devicetree::le(&[
         vbase as u32,
-        PHYS_BASE,
+        board.physical_base,
         board.mem_size(),
         top_of_kernel,
         board.vram_pa(),
@@ -768,7 +818,7 @@ pub fn build(kernel: &[u8], device_tree: &[u8], boot_args: &str, identity: &Unit
     ba.extend_from_slice(cmdline);
     ba.resize(ba.len() + 256 - cmdline.len(), 0);
     image[args_va - vbase..args_va - vbase + ba.len()].copy_from_slice(&ba);
-    Ok(Image { image, load_pa: PHYS_BASE, entry_pa: pa(m.entry()? as usize), boot_args_pa: pa(args_va) })
+    Ok(Image { image, load_pa: board.physical_base, entry_pa: pa(m.entry()? as usize), boot_args_pa: pa(args_va) })
 }
 
 /// image + segments ("K48SEG\0\0", pa, len, flags bit 0 = zero-fill, data) + the 24-byte trailer.

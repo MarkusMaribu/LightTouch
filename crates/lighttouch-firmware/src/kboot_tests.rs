@@ -126,6 +126,29 @@ fn flash_disk() -> Vec<u8> {
     node(&[("name", n("flash-controller0"))], &[node(&[("name", n("disk")), ("boot-from-nand", devicetree::le(&[1]))], &[])])
 }
 
+#[test]
+fn p101_boot_uses_a6x_memory_and_native_panel() {
+    let tree = device_tree(&[flash_disk()], &[]);
+    let tree = add(&tree, "", "compatible", b"P101AP\0iPad3,4\0AppleARM\0");
+    let tree = add(&tree, "chosen", "random-seed", &[0; 2]);
+    let flash = "arm-io/flash-controller0/disk";
+    let tree = add(&tree, flash, "device-readid", &[0; 8]);
+    let tree = add(&tree, flash, "#page-bytes", &[0; 4]);
+    let img = build_default(&kernel(0x8000_0000), &tree, Some(&[0; 512]));
+    let dt = built_dt(&img);
+
+    assert_eq!(img.load_pa, 0x8000_0000);
+    assert_eq!(img.entry_pa, 0x8000_1040);
+    assert_eq!(video(&img), [2048 * 4, 2048, 1536, 32 | 1 << 16]);
+    assert_eq!(word(&dt, "chosen", "chip-id"), Some(0x8955));
+    assert_eq!(dt.value("chosen", "random-seed"), Some(vec![0; 64]));
+    assert_eq!(word(&dt, flash, "boot-from-nand"), Some(1));
+    assert_eq!(word(&dt, flash, "#page-bytes"), Some(16_384));
+    assert_eq!(dt.value(flash, "device-readid"), Some(vec![0x50, 0x50, 0x4e, 1, 5, 5, 0, 0]));
+    assert_eq!(words(&dt, "vram", "reg"), [0xbf3f_c000, 2048 * 1536 * 4]);
+    assert_eq!(words(&dt, "pram", "reg"), [0xbfff_c000, PRAM_SIZE]);
+}
+
 /// N81: the board comes from the DT's compatible; its NOR is grafted in and boot-from-nand renamed away.
 #[test]
 fn n81_board() {

@@ -137,6 +137,16 @@ impl DeviceTree {
         Ok(())
     }
 
+    /// Replace a property whose boot-time value needs a different slot size.
+    pub fn replace(&mut self, path: &str, prop: &str, value: &[u8]) -> Result<()> {
+        let slot = self.slot(path, prop).ok_or_else(|| crate::unsupported!("DeviceTree: no {path}:{prop}"))?;
+        let mut record = le(&[value.len() as u32]);
+        record.extend_from_slice(value);
+        record.resize(4 + pad4(value.len()), 0);
+        self.data.splice(slot.offset + 32..slot.offset + 36 + pad4(slot.length), record);
+        self.reparse()
+    }
+
     /// Appends a property to a node; the blob grows, so lay memory out after the last add.
     pub fn add(&mut self, path: &str, prop: &str, value: &[u8]) -> Result<()> {
         let node = *self.nodes.get(path).ok_or_else(|| crate::unsupported!("DeviceTree: no node {path}"))?;
