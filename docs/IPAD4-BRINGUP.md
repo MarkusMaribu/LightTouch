@@ -127,3 +127,5 @@ gcc -O2 -municode -mwindows Windows/ipad4/launcher.c launcher.res.o -o LightTouc
 Place the EXE beside the prepared `device` folder and a `runtime` folder containing the engine as `qemu-system-arm-display.exe`, its DLLs, and `pc-bios`. Double-click the EXE for a resizable Retina window.
 
 Press **F6** in the SDL window to alternate between portrait and landscape. This turns the virtual motion sensors and the display together. Clicks and drags follow the displayed controls. The window swaps its width and height and fits within the current monitor. Maximized and full-screen windows keep their bounds.
+
+Press **F7** in the emulator window to put the iPad to sleep. Press **F7** again to wake it at the iOS lock screen. Holding the key triggers the shortcut once.
