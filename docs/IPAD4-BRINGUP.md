@@ -40,7 +40,7 @@ mkdir qemu-build
 )
 ```
 
-Set `QEMU_SRC` to the patched engine source checkout. On Windows, run the build in MSYS2 UCRT64 and use the `qemu-system-arm.exe` target. Add `--enable-sdl` and SDL2 to the build dependencies for a desktop display window.
+Set `QEMU_SRC` to the patched engine source checkout. On Windows, run the build in MSYS2 UCRT64 and use the `qemu-system-arm.exe` target. For an interactive Windows build, install SDL2, add `--enable-sdl` and set `--audio-drv-list=sdl` to include microphone capture and playback. A Cocoa build uses the Core Audio driver.
 
 ```sh
 "$QEMU" -L "$QEMU_BIOS" -M "iPad-4-wifi,kboot=$OUT/restore.kboot" -m 1G \
@@ -64,7 +64,7 @@ Python 3.11 or later can run the full restore and launch sequence. Use a new dir
 ```sh
 python3 scripts/ipad4.py prepare --ipsw "$IPSW" --device "$DEVICE" \
   --initializer "$INITIALIZER" --qemu "$QEMU" --bios "$QEMU_BIOS" \
-  --offline-setup --silent-audio
+  --offline-setup
 python3 scripts/ipad4.py run --device "$DEVICE" --qemu "$QEMU" --bios "$QEMU_BIOS"
 ```
 
@@ -73,7 +73,7 @@ The launcher defaults to SDL. The SDL window fits the monitor at startup, and dr
 The iPad starts in portrait at 1536 × 2048 with a 768 × 1024 point layout. Resize the window for a smaller picture. iOS still uses its Retina artwork. The experimental `--low-resolution` option changes the guest panel to 768 × 1024. The iPad 4 firmware omits 1x versions of some icons and controls, which appear blank in that mode. Photo Booth opens and draws its effect picker. Its live previews are currently unavailable on Windows.
 
 `--offline-setup` seeds iOS 6's Setup Assistant and factory activation preferences for the virtual device.
-`--silent-audio` moves the iOS `VirtualAudio` plug-in outside its discovery directory on the generated System volume. This avoids the audio session startup timeout that can restart SpringBoard. The launcher runs with host audio disabled.
+Interactive launches enable the emulated codec and use the host’s default audio devices. The iPad opens the microphone when it starts capture and releases it when capture stops. Headless runs use the silent backend. The optional `--silent-audio` preparation switch moves the stock `VirtualAudio` plug-in out of its discovery directory and disables guest microphone support.
 The restore command checks the IPSW hash and every System record's checksum, reads back the final record and compares the Data keybag before and after a remount.
 The device directory holds the writable virtual NAND, boot bundle and serial logs.
 
@@ -129,3 +129,16 @@ Place the EXE beside the prepared `device` folder and a `runtime` folder contain
 Press **F6** in the SDL window to alternate between portrait and landscape. This turns the virtual motion sensors and the display together. Clicks and drags follow the displayed controls. The window swaps its width and height and fits within the current monitor. Maximized and full-screen windows keep their bounds.
 
 Press **F7** in the emulator window to put the iPad to sleep. Press **F7** again to wake it at the iOS lock screen. Holding the key triggers the shortcut once.
+
+To turn on Siri, open **Settings → General → Siri**, turn the switch on, then tap **Enable**. The offline test used **English (United States)**. Press **F8** in the SDL window or hold **Home** for about two seconds. Both gestures invoke the iPad’s Home-button hold. On an offline iPad, Siri shows “Connect to the Internet.” Apple lists iOS 7 as the minimum for its current Siri service. [Apple Support](https://support.apple.com/en-us/105037)
+
+The Windows upgrade includes a locally built `runtime/repair-audio.kboot` for iPads prepared with `--silent-audio`. On first launch it checks the stock 10B329 plug-in, moves it back into the HAL directory if needed, and verifies it after a read-only remount. It mounts only the System volume. The launcher writes `device/nand/audio-hal-v1.ok` after verification and clean guest shutdown. See `device/repair-audio.log` for the result.
+
+For a source build, compile `scripts/ipad4/repair_audio.c` with `scripts/ipad4/build-repair-helper.ps1` and the same ARMv7 toolchain used for the restore helper. With the helper in `AUDIO_HELPER`, use the following commands on a stopped device.
+
+```sh
+python3 scripts/ipad4.py build-audio-repair --decrypted "$OUT/decrypted" \
+  --helper "$AUDIO_HELPER" --out "$OUT/repair-audio.kboot" --firmwarekit "$FWKIT"
+python3 scripts/ipad4.py repair-audio --repair-boot "$OUT/repair-audio.kboot" \
+  --device "$DEVICE" --qemu "$QEMU" --bios "$QEMU_BIOS"
+```
