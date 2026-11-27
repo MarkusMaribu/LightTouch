@@ -29,16 +29,19 @@ def engine(args, boot, nand, display, log, *, restore_stream=None):
     else:
         machine += ",retina=on" if args.retina else ",retina=off"
     audio_driver = "none"
+    network = []
     if display != "none":
         machine += ",display-probe=on,quiet-boot=on,wake-on-boot=on"
         machine += ",audio-ports-probe=on,ae2-probe=on,tristar-probe=on"
         audio_driver = "coreaudio" if display == "cocoa" else "sdl"
+        network = ["-netdev", "user,id=wifi0,lan=off",
+                   "-device", "usb-bcm-hsic,id=wlan,bus=usb-bus.0,port=2"]
     if display == "sdl":
         display = "sdl,show-cursor=on"
     return [
         str(args.qemu), "-L", str(args.bios), "-M", machine,
         "-m", "1G", "-display", display, "-monitor", "none",
-        "-audio", f"driver={audio_driver}", "-no-reboot", "-serial", f"file:{log}",
+        *network, "-audio", f"driver={audio_driver}", "-no-reboot", "-serial", f"file:{log}",
     ]
 
 

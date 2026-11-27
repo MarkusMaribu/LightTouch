@@ -794,10 +794,22 @@ index 6601ab9756..bc7c4a7399 100644
      DEFINE_PROP_UINT16("width", S5L8930DisplayState, width, 1024),     /* K48 */
      DEFINE_PROP_UINT16("height", S5L8930DisplayState, height, 768),
 diff --git a/hw/arm/s5l8930_i2s.c b/hw/arm/s5l8930_i2s.c
-index d7120aac9d..31c127cb02 100644
+index d7120aac9d..41e553e6c0 100644
 --- a/hw/arm/s5l8930_i2s.c
 +++ b/hw/arm/s5l8930_i2s.c
-@@ -269,14 +269,33 @@ static void i2s_set_in_rate(S5L8930I2SState *s, unsigned rate)
+@@ -52,7 +52,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(S5L8930I2SState, S5L8930_I2S)
+ #define I2S_TXFIFO      0x10
+ #define I2S_RXCOM       0x34
+ #define I2S_RXFIFO      0x38
+-#define I2S_CMD_RUN     6
++/* 10B329 AppleSamsungI2S (80b3ace8..ad30, 80b3b0b8) builds both TXCOM
++ * and RXCOM from bit 2 (direction enabled), bit 1 and additional v3
++ * configuration bits. The P101 microphone runs with RXCOM 0x01fd4a06. */
++#define I2S_CMD_ENABLE  (1u << 2)
+ #define I2S_TXCON       0x04
+ /*
+  * The Samsung I2S (the A4's 'i2s-1,samsung', AppleSamsungI2SController; the S5L8900's and S5L8720's
+@@ -269,14 +272,33 @@ static void i2s_set_in_rate(S5L8930I2SState *s, unsigned rate)
          .freq = rate, .nchannels = 2, .fmt = AUDIO_FORMAT_S16, .big_endian = false,
      };
  
@@ -834,7 +846,16 @@ index d7120aac9d..31c127cb02 100644
      }
  }
  
-@@ -423,7 +442,7 @@ static uint64_t i2s_read(void *opaque, hwaddr offset, unsigned size)
+@@ -376,7 +398,7 @@ static bool i2s_tx_running(S5L8930I2SState *s)
+     if (s->mca) {
+         return s->regs[0x18 >> 2] & 1;
+     }
+-    return s->ctrl_run ? s->regs[I2S_CTRL >> 2] & 1 : s->regs[I2S_TXCOM >> 2] == I2S_CMD_RUN;
++    return s->ctrl_run ? s->regs[I2S_CTRL >> 2] & 1 : s->regs[I2S_TXCOM >> 2] & I2S_CMD_ENABLE;
+ }
+ 
+ static void i2s_set_rate(S5L8930I2SState *s, unsigned rate)
+@@ -423,7 +445,7 @@ static uint64_t i2s_read(void *opaque, hwaddr offset, unsigned size)
          return s->regs[0] | I2S_CTRL_TX_IDLE;
      }
      if (offset == I2S_RXFIFO) {
@@ -843,7 +864,7 @@ index d7120aac9d..31c127cb02 100644
      }
      return offset == I2S_TXFIFO ? 0 : s->regs[offset >> 2];
  }
-@@ -436,6 +455,9 @@ static void i2s_lrclk_update(void *opaque, ClockEvent event)
+@@ -436,6 +458,9 @@ static void i2s_lrclk_update(void *opaque, ClockEvent event)
      if (s->voice && i2s_tx_running(s)) {
          i2s_set_rate(s, s5l8930_i2s_rate(s->port));
      }
@@ -853,7 +874,7 @@ index d7120aac9d..31c127cb02 100644
  }
  
  /*
-@@ -457,6 +479,9 @@ unsigned s5l8930_i2s_sync_rate(unsigned port)
+@@ -457,6 +482,9 @@ unsigned s5l8930_i2s_sync_rate(unsigned port)
      if (s && s->voice && i2s_tx_running(s)) {
          i2s_set_rate(s, rate);
      }
@@ -863,7 +884,7 @@ index d7120aac9d..31c127cb02 100644
      return rate;
  }
  
-@@ -490,23 +515,13 @@ static void i2s_write(void *opaque, hwaddr offset, uint64_t value,
+@@ -490,23 +518,13 @@ static void i2s_write(void *opaque, hwaddr offset, uint64_t value,
              if ((offset == 0x48 && (value & 1)) ||
                  (offset == 0x44 && (value & 0x202))) {
                  s->regs[0x2c >> 2] &= ~1u;
@@ -889,7 +910,7 @@ index d7120aac9d..31c127cb02 100644
          }
          if (offset == 0x18 && s->audio_out) {
              if (i2s_tx_running(s)) {
-@@ -527,15 +542,7 @@ static void i2s_write(void *opaque, hwaddr offset, uint64_t value,
+@@ -527,15 +545,7 @@ static void i2s_write(void *opaque, hwaddr offset, uint64_t value,
      }
      s->regs[offset >> 2] = value;
      if (offset == I2S_RXCOM && s->audio_out) {
@@ -902,11 +923,11 @@ index d7120aac9d..31c127cb02 100644
 -        if (s->voice_in) {
 -            audio_be_set_active_in(s->audio_be, s->voice_in, run);
 -        }
-+        i2s_set_in_rate(s, value == I2S_CMD_RUN ? s5l8930_i2s_rate(s->port) : 0);
++        i2s_set_in_rate(s, (value & I2S_CMD_ENABLE) ? s5l8930_i2s_rate(s->port) : 0);
      }
      if (offset == (s->ctrl_run ? I2S_CTRL : I2S_TXCOM) && s->voice) {
          if (i2s_tx_running(s)) {
-@@ -608,9 +615,7 @@ static void s5l8930_i2s_reset(DeviceState *dev)
+@@ -608,9 +618,7 @@ static void s5l8930_i2s_reset(DeviceState *dev)
      if (s->voice) {
          audio_be_set_active_out(s->audio_be, s->voice, 0);
      }
@@ -917,12 +938,12 @@ index d7120aac9d..31c127cb02 100644
  }
  
  static void s5l8930_i2s_init(Object *obj)
-@@ -628,7 +633,13 @@ static void s5l8930_i2s_init(Object *obj)
+@@ -628,7 +636,13 @@ static void s5l8930_i2s_init(Object *obj)
  static int s5l8930_i2s_post_load(void *opaque, int version_id)
  {
      S5L8930I2SState *s = opaque;
 +    bool rx_running = s->mca ? s->audio_in && (s->regs[0x2c >> 2] & 1)
-+                             : s->audio_out && s->regs[I2S_RXCOM >> 2] == I2S_CMD_RUN;
++                             : s->audio_out && (s->regs[I2S_RXCOM >> 2] & I2S_CMD_ENABLE);
  
 +    i2s_set_in_rate(s, 0);
 +    if (rx_running) {
@@ -1006,10 +1027,10 @@ index f94c7d9642..17c5cdc842 100644
          if (request != 8 && request < 12)
              return 1;
 diff --git a/hw/arm/s5l8950.c b/hw/arm/s5l8950.c
-index 547b8bd0af..161331e2d8 100644
+index 547b8bd0af..c940f2baa1 100644
 --- a/hw/arm/s5l8950.c
 +++ b/hw/arm/s5l8950.c
-@@ -21,10 +21,12 @@
+@@ -21,16 +21,19 @@
  #include "hw/core/qdev-properties.h"
  #include "hw/arm/exynos4210.h"
  #include "hw/arm/s5l8930.h"
@@ -1022,7 +1043,14 @@ index 547b8bd0af..161331e2d8 100644
  #include "hw/arm/ipod_touch_usb_phys.h"
  #include "hw/i2c/i2c.h"
  #include "hw/usb/hcd-ehci.h"
-@@ -53,6 +55,7 @@
+ #include "hw/usb/hcd-ohci.h"
+ #include "hw/misc/ios_baseband.h"
+ #include "hw/usb/mdm9x15.h"
++#include "net/util.h"
+ #include "hw/arm/machines-qom.h"
+ #include "system/address-spaces.h"
+ #include "system/reset.h"
+@@ -53,6 +56,7 @@
  #include "trace.h"
  
  #define TYPE_S5L8950_MACHINE MACHINE_TYPE_NAME("iPhone-5")
@@ -1030,7 +1058,7 @@ index 547b8bd0af..161331e2d8 100644
  OBJECT_DECLARE_SIMPLE_TYPE(S5L8950State, S5L8950_MACHINE)
  #define A6_RAM_BASE 0x80000000ULL
  #define A6_RAM_SIZE 0x40000000ULL
-@@ -102,6 +105,36 @@ static void a6_mouse_event(void *opaque, int x, int y, int z, int buttons)
+@@ -102,6 +106,36 @@ static void a6_mouse_event(void *opaque, int x, int y, int z, int buttons)
      }
  }
  
@@ -1067,7 +1095,7 @@ index 547b8bd0af..161331e2d8 100644
  /* A5/A6 use the PA Semi command-FIFO I2C block, rather than A4's block.
   * Register/command definitions are cross-checked against Linux's
   * drivers/i2c/busses/i2c-pasemi-core.c and the original N42 driver traffic. */
-@@ -232,18 +265,29 @@ struct S5L8950State {
+@@ -232,18 +266,29 @@ struct S5L8950State {
      uint32_t ae2_regs[0x2000 / 4];
      DeviceState *gpio;
      DeviceState *pmu;
@@ -1097,7 +1125,7 @@ index 547b8bd0af..161331e2d8 100644
      bool battery_probe;
      bool backlight_probe;
      bool hsic_ready_probe;
-@@ -262,12 +306,64 @@ struct S5L8950State {
+@@ -262,16 +307,93 @@ struct S5L8950State {
      unsigned unimplemented, unimplemented_iop;
      QemuConsole *console;
      uint32_t framebuffer;
@@ -1109,6 +1137,10 @@ index 547b8bd0af..161331e2d8 100644
      uint64_t powerdown_sequence;
  };
  
+-/* Native N42 DT handshake: HOST_READY GPIO2.1 /6.6, DEVICE_READY GPIO26.3
+- * /7.1, EHCI ports2/4. An attached HSIC peer acknowledges host readiness;
+- * an absent peer cannot assert DEVICE_READY. Wire both handshake levels
+- * by default, as required by the older native HSIC state machine. */
 +static void p101_release_home(void *opaque)
 +{
 +    s5l8950_press_button(IPOD_TOUCH_BUTTON_HOME, false);
@@ -1159,10 +1191,90 @@ index 547b8bd0af..161331e2d8 100644
 +    a6_mouse_event(opaque, x, y, z, buttons);
 +}
 +
- /* Native N42 DT handshake: HOST_READY GPIO2.1 /6.6, DEVICE_READY GPIO26.3
-  * /7.1, EHCI ports2/4. An attached HSIC peer acknowledges host readiness;
-  * an absent peer cannot assert DEVICE_READY. Wire both handshake levels
-@@ -324,6 +420,21 @@ static void a6_wlan_reset(void *opaque, int pin, int level)
++/* /arm-io/usb-complex/usb-ehci0/wlan from each board's stock DT. */
++typedef struct A6WlanWiring {
++    const char *port;
++    unsigned host_ready, device_ready, remote_wake, pmu_reset;
++} A6WlanWiring;
++
++static const A6WlanWiring *a6_wlan_wiring(const S5L8950State *s)
++{
++    static const A6WlanWiring n42  = { "4", 54, 57, 200, 10 };
++    static const A6WlanWiring p101 = { "2", 11, 196, 204, 3 };
++    return s->p101 ? &p101 : &n42;
++}
++
++static USBDevice *a6_wlan_device(S5L8950State *s)
++{
++    const char *path = a6_wlan_wiring(s)->port;
++    USBPort *port;
++    if (s->hsic_bus) {
++        QTAILQ_FOREACH(port, &s->hsic_bus->used, next) {
++            if (!strcmp(port->path, path) && port->dev &&
++                object_dynamic_cast(OBJECT(port->dev), "usb-bcm-hsic")) {
++                return port->dev;
++            }
++        }
++    }
++    return NULL;
++}
++
++/* A peer can assert DEVICE_READY only while present on its physical port. */
+ static void a6_hsic_ready(void *opaque, int link, int level)
+ {
+     S5L8950State *s = opaque;
+@@ -280,7 +402,8 @@ static void a6_hsic_ready(void *opaque, int link, int level)
+                      level);
+         return;
+     }
+-    const char *path = link ? "4" : "2";
++    const A6WlanWiring *wlan = a6_wlan_wiring(s);
++    const char *path = link ? wlan->port : "2";
+     bool attached = false;
+     USBPort *port;
+     if (s->hsic_bus) {
+@@ -292,38 +415,45 @@ static void a6_hsic_ready(void *opaque, int link, int level)
+             }
+         }
+     }
+-    qemu_set_irq(qdev_get_gpio_in(s->gpio, link ? 57 : 211), level && attached);
++    qemu_set_irq(qdev_get_gpio_in(s->gpio, link ? wlan->device_ready : 211),
++                 level && attached);
+ }
+ 
+-/* N42 PMU GPIO10 is the active-low BCM4334 module reset. A powered,
++/* The PMU drives the BCM4334 module's active-low reset. A powered,
+  * attached peer may announce readiness after reset release before the AP
+  * raises HOST_READY; subsequent host-ready transitions use the usual path. */
+ static void a6_wlan_reset(void *opaque, int pin, int level)
+ {
+     S5L8950State *s = opaque;
+     bool ready = false;
+-    USBPort *port;
+-
+-    if (s->hsic_bus) {
+-        QTAILQ_FOREACH(port, &s->hsic_bus->used, next)
+-        {
+-            if (!strcmp(port->path, "4") && port->dev &&
+-                object_dynamic_cast(OBJECT(port->dev), "usb-bcm-hsic")) {
+-                qemu_set_irq(
+-                    qdev_get_gpio_in_named(DEVICE(port->dev), "reset", 0),
+-                    !level);
+-                ready = level && port->dev->attached;
+-                break;
+-            }
+-        }
++    USBDevice *dev = a6_wlan_device(s);
++    if (dev) {
++        qemu_set_irq(qdev_get_gpio_in_named(DEVICE(dev), "reset", 0), !level);
++        ready = level && dev->attached;
+     }
+-    qemu_set_irq(qdev_get_gpio_in(s->gpio, 57), ready);
++    qemu_set_irq(qdev_get_gpio_in(s->gpio, a6_wlan_wiring(s)->device_ready),
++                 ready);
+ }
+ 
+ /* The existing qemu-ios guest-services ABI, shared with the other machines.
   * Graphics uses the common host executor and request validation. The optional
   * factory-imaging transport supplies one read-only stream only when explicitly
   * configured; its writes use the guest's native block/FTL drivers. */
@@ -1184,7 +1296,7 @@ index 547b8bd0af..161331e2d8 100644
  static void a6_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
                           uint64_t value)
  {
-@@ -362,7 +473,7 @@ static void a6_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
+@@ -362,7 +492,7 @@ static void a6_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
          if (n && n <= 65536 && off <= s->restore_size &&
              n <= s->restore_size - off) {
              g_autofree uint8_t *buffer = g_malloc(n);
@@ -1193,7 +1305,7 @@ index 547b8bd0af..161331e2d8 100644
              if (count >= 0 && !guest_copy(cpu, q.args.ag.buffer_guest_ptr,
                                            buffer, count, true)) {
                  q.retval = count;
-@@ -395,12 +506,18 @@ static void a6_display_update(void *opaque)
+@@ -395,12 +525,18 @@ static void a6_display_update(void *opaque)
      if (!s->framebuffer)
          return;
      DisplaySurface *surface = qemu_console_surface(s->console);
@@ -1215,7 +1327,7 @@ index 547b8bd0af..161331e2d8 100644
  }
  static const GraphicHwOps a6_display_ops = {.gfx_update = a6_display_update};
  
-@@ -1292,22 +1409,76 @@ static void a6_machine_reset(MachineState *machine, ResetType type)
+@@ -1292,22 +1428,91 @@ static void a6_machine_reset(MachineState *machine, ResetType type)
      qemu_devices_reset(type);
  }
  
@@ -1245,6 +1357,21 @@ index 547b8bd0af..161331e2d8 100644
                             sizeof(a6_n42_product_id)});
  }
  
++static void p101_dt_wlan(S5L8950State *s, uint8_t *image, size_t length,
++                         uint32_t load, uint32_t arguments)
++{
++    USBDevice *dev = a6_wlan_device(s);
++    if (dev) {
++        uint8_t mac[6];
++        g_autofree char *value =
++            object_property_get_str(OBJECT(dev), "mac", &error_abort);
++        if (net_parse_macaddr(mac, value) == 0) {
++            a4_dt_edit(image, length, load, arguments,
++                       &(A4DTEdit){"wlan", "local-mac-address", mac, sizeof(mac)});
++        }
++    }
++}
++
 +static bool p101_prepare_display(uint8_t *image, size_t length, uint32_t load,
 +                                 uint32_t arguments, unsigned w, unsigned h)
 +{
@@ -1297,7 +1424,7 @@ index 547b8bd0af..161331e2d8 100644
  static void a6_reset(void *opaque)
  {
      S5L8950State *s = opaque;
-@@ -1317,6 +1488,20 @@ static void a6_reset(void *opaque)
+@@ -1317,6 +1522,20 @@ static void a6_reset(void *opaque)
      if (resume && a6_resume(s)) {
          return;
      }
@@ -1318,7 +1445,7 @@ index 547b8bd0af..161331e2d8 100644
      g_autofree char *data = NULL;
      gsize size;
      GError *error = NULL;
-@@ -1331,8 +1516,9 @@ static void a6_reset(void *opaque)
+@@ -1331,8 +1550,9 @@ static void a6_reset(void *opaque)
      uint32_t arguments = ldl_le_p(trailer + 16),
               length = ldl_le_p(trailer + 20);
      if (length > size - 24 || load < A6_RAM_BASE ||
@@ -1330,7 +1457,7 @@ index 547b8bd0af..161331e2d8 100644
          exit(1);
      }
      if (s->quiet_boot &&
-@@ -1340,6 +1526,24 @@ static void a6_reset(void *opaque)
+@@ -1340,6 +1560,24 @@ static void a6_reset(void *opaque)
          error_report("quiet-boot: invalid ARM32 boot command line");
          exit(1);
      }
@@ -1355,7 +1482,7 @@ index 547b8bd0af..161331e2d8 100644
      /* iBoot supplies fresh entropy in the IPSW DT's reserved random-seed
       * slot. XNU rejects an all-zero seed; regenerate it on every reset,
       * without storing host entropy in the prepared firmware artifact. */
-@@ -1356,12 +1560,24 @@ static void a6_reset(void *opaque)
+@@ -1356,12 +1594,25 @@ static void a6_reset(void *opaque)
          a4_dt_edit((uint8_t *)data, length, load, arguments,
                     &(A4DTEdit){"isp", "compatible", "none", 5});
      }
@@ -1370,6 +1497,7 @@ index 547b8bd0af..161331e2d8 100644
 +        a4_dt_edit((uint8_t *)data, length, load, arguments,
 +                   &(A4DTEdit){"gyro", "gyro-sensitivity-calibration",
 +                               cal, sizeof(cal)});
++        p101_dt_wlan(s, (uint8_t *)data, length, load, arguments);
 +    }
 +    a6_dt_identity((uint8_t *)data, length, load, arguments, s->p101);
      a6_reset_soc(s);
@@ -1381,7 +1509,7 @@ index 547b8bd0af..161331e2d8 100644
      for (gsize off = length; off + 20 <= size - 24;) {
          const uint8_t *seg = (const uint8_t *)data + off;
          uint32_t pa = ldl_le_p(seg + 8), bytes = ldl_le_p(seg + 12);
-@@ -1373,6 +1589,31 @@ static void a6_reset(void *opaque)
+@@ -1373,6 +1624,31 @@ static void a6_reset(void *opaque)
              error_report("iPhone-5: invalid auxiliary RAM segment");
              exit(1);
          }
@@ -1413,7 +1541,7 @@ index 547b8bd0af..161331e2d8 100644
          if (zero)
              address_space_set(&address_space_memory, pa, 0, bytes,
                                MEMTXATTRS_UNSPECIFIED);
-@@ -1380,7 +1621,6 @@ static void a6_reset(void *opaque)
+@@ -1380,7 +1656,6 @@ static void a6_reset(void *opaque)
              address_space_write(&address_space_memory, pa,
                                  MEMTXATTRS_UNSPECIFIED, seg + 20, bytes);
      }
@@ -1421,7 +1549,7 @@ index 547b8bd0af..161331e2d8 100644
      for (int i = 0; i < 2; i++) {
          cpu_reset(CPU(s->cpu[i]));
          s->cpu[i]->env.cp15.c14_timer[GTIMER_VIRT].cval = UINT64_MAX;
-@@ -1392,8 +1632,8 @@ static void a6_reset(void *opaque)
+@@ -1392,8 +1667,8 @@ static void a6_reset(void *opaque)
      cpu_set_pc(CPU(s->cpu[0]), entry);
      fprintf(
          stderr,
@@ -1432,7 +1560,41 @@ index 547b8bd0af..161331e2d8 100644
  }
  
  /* Use the existing native launchd halt RPC. The request itself is not proof
-@@ -1486,7 +1726,7 @@ static void a6_init(MachineState *machine)
+@@ -1423,24 +1698,23 @@ static Notifier a6_powerdown_notifier = {.notify = a6_powerdown_req};
+ static void a6_wire_remote_wake(Notifier *notifier, void *opaque)
+ {
+     S5L8950State *s = S5L8950_MACHINE(qdev_get_machine());
+-    USBPort *port;
++    const A6WlanWiring *wlan = a6_wlan_wiring(s);
+ 
+     if (!s->hsic_bus) {
+         return;
+     }
+-    s5l8930_gpio_set_rest_level(s->gpio, 10, false);
+-    s5l8930_gpio_set_rest_level(s->gpio, 200, false);
++    if (!s->p101) {
++        s5l8930_gpio_set_rest_level(s->gpio, 10, false);
++    }
++    s5l8930_gpio_set_rest_level(s->gpio, wlan->remote_wake, false);
+     if (s->baseband_usb) {
+         qdev_connect_gpio_out_named(s->baseband_usb, "remote-wake", 0,
+                                     qdev_get_gpio_in(s->gpio, 10));
+     }
+-    QTAILQ_FOREACH(port, &s->hsic_bus->used, next)
+-    {
+-        if (!strcmp(port->path, "4") && port->dev &&
+-            object_dynamic_cast(OBJECT(port->dev), "usb-bcm-hsic")) {
+-            qdev_connect_gpio_out_named(DEVICE(port->dev), "remote-wake", 0,
+-                                        qdev_get_gpio_in(s->gpio, 200));
+-        }
++    USBDevice *dev = a6_wlan_device(s);
++    if (dev) {
++        qdev_connect_gpio_out_named(DEVICE(dev), "remote-wake", 0,
++                                    qdev_get_gpio_in(s->gpio, wlan->remote_wake));
+     }
+ }
+ 
+@@ -1486,7 +1760,7 @@ static void a6_init(MachineState *machine)
      gles_host_set_a6(true);
      if (s->restore_image) {
          struct stat st;
@@ -1441,7 +1603,7 @@ index 547b8bd0af..161331e2d8 100644
          if (s->restore_fd < 0 || fstat(s->restore_fd, &st) ||
              !S_ISREG(st.st_mode)) {
              error_report("Cannot open regular restore-image file");
-@@ -1495,7 +1735,8 @@ static void a6_init(MachineState *machine)
+@@ -1495,7 +1769,8 @@ static void a6_init(MachineState *machine)
          s->restore_size = st.st_size;
      }
      if (!s->kboot) {
@@ -1451,7 +1613,7 @@ index 547b8bd0af..161331e2d8 100644
          exit(1);
      }
      memory_region_init_ram(&s->ram, NULL, "a6.dram", A6_RAM_SIZE, &error_fatal);
-@@ -1536,39 +1777,49 @@ static void a6_init(MachineState *machine)
+@@ -1536,39 +1811,49 @@ static void a6_init(MachineState *machine)
      sysbus_mmio_map(SYS_BUS_DEVICE(gpio), 0, 0x3fa00000);
      sysbus_connect_irq(SYS_BUS_DEVICE(gpio), 0,
                         qemu_allocate_irq(a6_irq, s, 119));
@@ -1518,7 +1680,7 @@ index 547b8bd0af..161331e2d8 100644
              DeviceState *port = qdev_new(TYPE_S5L8930_I2S);
              qdev_prop_set_bit(port, "audio-out", i == 0);
              qdev_prop_set_uint8(port, "port", i);
-@@ -1599,33 +1850,59 @@ static void a6_init(MachineState *machine)
+@@ -1599,33 +1884,59 @@ static void a6_init(MachineState *machine)
          sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                             qemu_allocate_irq(a6_irq, s, 18 + i));
      }
@@ -1595,17 +1757,26 @@ index 547b8bd0af..161331e2d8 100644
      }
      if (s->usb_host_probe) {
          /* N42's DT advertises the A4 PHY and S5L8900 device-controller
-@@ -1659,7 +1936,7 @@ static void a6_init(MachineState *machine)
-         sysbus_connect_irq(SYS_BUS_DEVICE(host), 0,
+@@ -1660,16 +1971,19 @@ static void a6_init(MachineState *machine)
                             qemu_allocate_irq(a6_irq, s, 12));
          qemu_add_machine_init_done_notifier(&a6_remote_wake_notifier);
--        if (s->hsic_ready_probe) {
-+        if (s->hsic_ready_probe && !s->p101) {
-             s5l8930_gpio_set_rest_level(gpio, 211, false);
-             s5l8930_gpio_set_rest_level(gpio, 57, false);
-             qdev_connect_gpio_out(gpio, 17,
-@@ -1669,7 +1946,7 @@ static void a6_init(MachineState *machine)
-             qdev_connect_gpio_out_named(s->pmu, "gpio", 10,
+         if (s->hsic_ready_probe) {
+-            s5l8930_gpio_set_rest_level(gpio, 211, false);
+-            s5l8930_gpio_set_rest_level(gpio, 57, false);
+-            qdev_connect_gpio_out(gpio, 17,
+-                                  qemu_allocate_irq(a6_hsic_ready, s, 0));
+-            qdev_connect_gpio_out(gpio, 54,
++            const A6WlanWiring *wlan = a6_wlan_wiring(s);
++            if (!s->p101) {
++                s5l8930_gpio_set_rest_level(gpio, 211, false);
++                qdev_connect_gpio_out(gpio, 17,
++                                      qemu_allocate_irq(a6_hsic_ready, s, 0));
++            }
++            s5l8930_gpio_set_rest_level(gpio, wlan->device_ready, false);
++            qdev_connect_gpio_out(gpio, wlan->host_ready,
+                                   qemu_allocate_irq(a6_hsic_ready, s, 1));
+-            qdev_connect_gpio_out_named(s->pmu, "gpio", 10,
++            qdev_connect_gpio_out_named(s->pmu, "gpio", wlan->pmu_reset,
                                          qemu_allocate_irq(a6_wlan_reset, s, 0));
          }
 -        if (s->baseband) {
@@ -1613,7 +1784,7 @@ index 547b8bd0af..161331e2d8 100644
              DeviceState *bb = qdev_new(TYPE_IOS_BASEBAND);
              USBDevice *modem = USB_DEVICE(qdev_new("usb-mdm9x15"));
  
-@@ -1726,7 +2003,7 @@ static void a6_init(MachineState *machine)
+@@ -1726,7 +2040,7 @@ static void a6_init(MachineState *machine)
              sysbus_connect_irq(SYS_BUS_DEVICE(modem_uart), 0,
                                 qemu_allocate_irq(a6_irq, s, 0x16));
          }
@@ -1622,7 +1793,7 @@ index 547b8bd0af..161331e2d8 100644
              host = qdev_new(TYPE_SYSBUS_OHCI);
              qdev_prop_set_uint32(host, "num-ports", 1);
              sysbus_realize_and_unref(SYS_BUS_DEVICE(host), &error_fatal);
-@@ -1773,6 +2050,12 @@ static void a6_init(MachineState *machine)
+@@ -1773,6 +2087,12 @@ static void a6_init(MachineState *machine)
      qdev_prop_set_uint32(cdma, "num-channels", A6_CDMA_CHANNELS);
      qdev_prop_set_uint8(cdma, "version", 5);
      qdev_prop_set_bit(cdma, "nand-file-aes", true);
@@ -1635,7 +1806,7 @@ index 547b8bd0af..161331e2d8 100644
      if (s->audio_ports_probe) {
          qdev_prop_set_uint32(cdma, "paced-base", 0x34190000);
          qdev_prop_set_uint32(cdma, "paced-ports", 8);
-@@ -1865,10 +2148,16 @@ static void a6_init(MachineState *machine)
+@@ -1865,10 +2185,16 @@ static void a6_init(MachineState *machine)
           * blocks while qualifying the additional H5P register/IRQ contract.
           * It is not yet a claim of complete A6 display hardware support. */
          DeviceState *display = qdev_new(TYPE_S5L8930_DISPLAY);
@@ -1655,7 +1826,7 @@ index 547b8bd0af..161331e2d8 100644
          sysbus_realize_and_unref(SYS_BUS_DEVICE(display), &error_fatal);
          sysbus_mmio_map(SYS_BUS_DEVICE(display), 0, 0x3a100000);
          sysbus_mmio_map(SYS_BUS_DEVICE(display), 1, 0x39200000);
-@@ -1889,15 +2178,29 @@ static void a6_init(MachineState *machine)
+@@ -1889,15 +2215,29 @@ static void a6_init(MachineState *machine)
           * 0x39500000, IRQ 41. The native AppleSamsungMIPIDSIController uses
           * the shared STATUS/CLKCTRL/PKTHDR register contract. The second
           * DT window (0x3f110000) is the separate, unmodeled SAC block. */
@@ -1694,7 +1865,7 @@ index 547b8bd0af..161331e2d8 100644
          /* Original N42 scaler/dart-nrt compatibility includes the shared
           * Samsung M2 and S5L8930 DART interfaces. Mapper-scaler uses SIDs 2/3;
           * the existing scaler model consumes SID 2. Its reported 0x20007 is
-@@ -1927,9 +2230,6 @@ static void a6_init(MachineState *machine)
+@@ -1927,9 +2267,6 @@ static void a6_init(MachineState *machine)
              ipod_scaler_set_iommu(scaler, a6_scaler_xlate, dart, 2);
              ipod_scaler_set_version(scaler, 0x20007);
          }
@@ -1704,7 +1875,7 @@ index 547b8bd0af..161331e2d8 100644
      }
      qemu_register_reset(a6_reset, s);
      qemu_register_powerdown_notifier(&a6_powerdown_notifier);
-@@ -2117,16 +2417,36 @@ static char *a6_get_timer_status(Object *obj, Error **errp)
+@@ -2117,16 +2454,36 @@ static char *a6_get_timer_status(Object *obj, Error **errp)
   * separate from these awake GPIO pads. */
  void s5l8950_press_button(IPodTouchButton button, bool down)
  {
@@ -1744,7 +1915,7 @@ index 547b8bd0af..161331e2d8 100644
          (button == IPOD_TOUCH_BUTTON_HOME ||
           button == IPOD_TOUCH_BUTTON_POWER)) {
          a6_pmu_button(s->pmu, button == IPOD_TOUCH_BUTTON_POWER);
-@@ -2240,25 +2560,40 @@ static void a6_set_quiet_boot(Object *obj, bool value, Error **errp)
+@@ -2240,25 +2597,40 @@ static void a6_set_quiet_boot(Object *obj, bool value, Error **errp)
      S5L8950_MACHINE(obj)->quiet_boot = value;
  }
  
@@ -1783,19 +1954,18 @@ index 547b8bd0af..161331e2d8 100644
 -    s->audio_ports_probe = true;
 -    s->backlight_probe = true;
 -    s->battery_probe = true;
--    s->hsic_ready_probe = true;
--    guest_pkg_init(&S5L8950_MACHINE(obj)->pkg, obj);
--    guest_pb_init(&S5L8950_MACHINE(obj)->pb, obj, "iphone5");
 +    s->audio_ports_probe = !s->p101;
 +    s->backlight_probe = !s->p101;
 +    s->battery_probe = !s->p101;
-+    s->hsic_ready_probe = !s->p101;
+     s->hsic_ready_probe = true;
+-    guest_pkg_init(&S5L8950_MACHINE(obj)->pkg, obj);
+-    guest_pb_init(&S5L8950_MACHINE(obj)->pb, obj, "iphone5");
 +    guest_pkg_init(&s->pkg, obj);
 +    guest_pb_init(&s->pb, obj, s->p101 ? "ipad4" : "iphone5");
      S5L8950_MACHINE(obj)->agent = ipod_agent_new();
      ipod_agent_publish(S5L8950_MACHINE(obj)->agent);
      object_property_add_str(obj, "agent-request", NULL, a6_set_agent_request);
-@@ -2268,9 +2603,13 @@ static void a6_instance_init(Object *obj)
+@@ -2268,9 +2640,13 @@ static void a6_instance_init(Object *obj)
  }
  static void a6_instance_finalize(Object *obj)
  {
@@ -1811,7 +1981,7 @@ index 547b8bd0af..161331e2d8 100644
  }
  
  static const TypeInfo a6_machine = {
-@@ -2282,6 +2621,64 @@ static const TypeInfo a6_machine = {
+@@ -2282,6 +2658,68 @@ static const TypeInfo a6_machine = {
      .instance_init = a6_instance_init,
      .instance_finalize = a6_instance_finalize,
  };
@@ -1851,6 +2021,9 @@ index 547b8bd0af..161331e2d8 100644
 +static void p101_class_init(ObjectClass *klass, const void *data)
 +{
 +    MachineClass *mc = MACHINE_CLASS(klass);
++    static GlobalProperty wlan_defaults[] = {
++        { "usb-bcm-hsic", "randall-module", "on" },
++    };
 +
 +    object_class_property_add_bool(klass, "retina", p101_get_retina, p101_set_retina);
 +    object_class_property_add_bool(klass, "panel-landscape", p101_get_landscape,
@@ -1865,6 +2038,7 @@ index 547b8bd0af..161331e2d8 100644
 +    /* QEMU initializes a separate compat property array for each machine type. */
 +    compat_props_add(mc->compat_props, a6_device_defaults,
 +                     G_N_ELEMENTS(a6_device_defaults));
++    compat_props_add(mc->compat_props, wlan_defaults, G_N_ELEMENTS(wlan_defaults));
 +    mc->desc = "iPad 4 Wi-Fi (P101AP, S5L8955/A6X, bring-up)";
 +}
 +
@@ -1876,7 +2050,7 @@ index 547b8bd0af..161331e2d8 100644
  /* D1972 register interface with an opt-in ADC experiment. The original N42
   * driver starts conversions with register 48 bit 5 and consumes the completion
   * at event register 2 bit 5 (80bdc86c..c8de). Its result unpacking at
-@@ -2294,6 +2691,7 @@ typedef struct A6PMU {
+@@ -2294,6 +2732,7 @@ typedef struct A6PMU {
      uint8_t regs[256], reg;
      unsigned log_count;
      bool address;
@@ -1884,7 +2058,7 @@ index 547b8bd0af..161331e2d8 100644
      bool adc_probe;
      bool thermal_sensors;
      bool battery_swi;
-@@ -2317,10 +2715,12 @@ static void a6_pmu_set_ap_power(A6PMU *s, bool on)
+@@ -2317,10 +2756,12 @@ static void a6_pmu_set_ap_power(A6PMU *s, bool on)
  static void a6_pmu_irq_update(A6PMU *s)
  {
      bool pending = false;
@@ -1900,7 +2074,7 @@ index 547b8bd0af..161331e2d8 100644
      qemu_set_irq(s->irq, !pending);
      if (pending && s->ap_off) {
          a6_pmu_set_ap_power(s, true);
-@@ -2364,8 +2764,20 @@ static void a6_pmu_adc_complete(void *opaque)
+@@ -2364,8 +2805,20 @@ static void a6_pmu_adc_complete(void *opaque)
  {
      A6PMU *s = opaque;
      uint16_t raw = s->adc_input & 0xfff;
@@ -1923,7 +2097,7 @@ index 547b8bd0af..161331e2d8 100644
          /* N42's calibration resistor and external NTCs are separate analog
           * inputs. Equal counts make the native calibration correction force
           * the external sensors to the reference resistor's temperature. */
-@@ -2375,7 +2787,7 @@ static void a6_pmu_adc_complete(void *opaque)
+@@ -2375,7 +2828,7 @@ static void a6_pmu_adc_complete(void *opaque)
              raw = 800;
          }
      }
@@ -1932,7 +2106,7 @@ index 547b8bd0af..161331e2d8 100644
          /* Channel 6 is the Lightning port's USB data lines, which TriStar
           * switches to the ADC to tell a host from a charger (its switch
           * writes 01=0c and 0d around each conversion). A host's pull-downs
-@@ -2388,11 +2800,17 @@ static void a6_pmu_adc_complete(void *opaque)
+@@ -2388,11 +2841,17 @@ static void a6_pmu_adc_complete(void *opaque)
      }
      s->regs[0x49] = raw & 0xf;
      s->regs[0x4a] = raw >> 4;
@@ -1953,12 +2127,13 @@ index 547b8bd0af..161331e2d8 100644
  }
  static int a6_pmu_event(I2CSlave *dev, enum i2c_event event)
  {
-@@ -2414,12 +2832,12 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
+@@ -2414,12 +2873,14 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
              current_cpu ? CPU_GET_CLASS(current_cpu)->get_pc(current_cpu) : 0);
          /* bounded: uint8_t reg addresses the 256-byte register file. */
          s->regs[reg] = data;
--        if (reg >= 0x68 && reg <= 0x73) {
-+        if (!s->d2018 && reg >= 0x68 && reg <= 0x73) {
++        /* Both PMUs use 0x68 + pin. P101's native D2018 GPIO function
++         * writes 00/02 to 6b to assert/release the Broadcom module reset. */
+         if (reg >= 0x68 && reg <= 0x73) {
              trace_a6_pmu_gpio(reg - 0x68, previous, data);
              qemu_set_irq(s->gpio[reg - 0x68],
                           (data & 0x60) == 0x60 || (data & 2));
@@ -1968,7 +2143,7 @@ index 547b8bd0af..161331e2d8 100644
              /* Original D1972: hibernate uses B0=80 then 1B|=2;
               * standby (80bdf914) uses 1B|=1 after flash shutdown.
               * Both rail commands are consumed, not persistent bits. */
-@@ -2433,7 +2851,14 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
+@@ -2433,7 +2894,14 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
                  a6_pmu_set_ap_power(s, false);
              }
          }
@@ -1984,7 +2159,7 @@ index 547b8bd0af..161331e2d8 100644
              /* Original D1972 halt with VBUS writes B0=90, then uses
               * restart 99|=29 to enter iBoot's off-but-charging state.
               * As on the A4 PMU, this is a completed guest shutdown,
-@@ -2445,14 +2870,13 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
+@@ -2445,14 +2913,13 @@ static int a6_pmu_send(I2CSlave *dev, uint8_t data)
                  qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
              }
          }
@@ -2006,7 +2181,7 @@ index 547b8bd0af..161331e2d8 100644
              }
          }
          a6_pmu_irq_update(s);
-@@ -2473,14 +2897,20 @@ static uint8_t a6_pmu_recv(I2CSlave *dev)
+@@ -2473,14 +2940,20 @@ static uint8_t a6_pmu_recv(I2CSlave *dev)
      A6PMU *s = (A6PMU *)dev;
      /* bounded: uint8_t reg addresses the 256-byte register file. */
      uint8_t reg = s->reg++, value = s->regs[reg];
@@ -2029,7 +2204,7 @@ index 547b8bd0af..161331e2d8 100644
          value = (value & ~0x06) | (s->usb_power ? 0x02 : 0);
      }
      if (s->battery_swi && reg == 0x0c) {
-@@ -2498,7 +2928,7 @@ static uint8_t a6_pmu_recv(I2CSlave *dev)
+@@ -2498,7 +2971,7 @@ static uint8_t a6_pmu_recv(I2CSlave *dev)
      if (reg >= 0x64 && reg <= 0x67) {
          value = s->rtc_latch >> (8 * (reg - 0x64));
      }
@@ -2038,7 +2213,7 @@ index 547b8bd0af..161331e2d8 100644
          s->regs[reg] = 0;
          a6_pmu_irq_update(s);
      }
-@@ -2531,7 +2961,11 @@ static void a6_pmu_reset(DeviceState *dev)
+@@ -2531,7 +3004,11 @@ static void a6_pmu_reset(DeviceState *dev)
      if (s->battery_swi) {
          s->regs[0x6d] = 0x60; /* released battery single-wire input */
      }
@@ -2051,7 +2226,7 @@ index 547b8bd0af..161331e2d8 100644
      s->reg = 0;
      s->address = false;
      a6_pmu_irq_update(s);
-@@ -2565,6 +2999,18 @@ static const TypeInfo a6_pmu_type = {
+@@ -2565,6 +3042,18 @@ static const TypeInfo a6_pmu_type = {
      .instance_finalize = a6_pmu_finalize,
  };
  
@@ -2070,7 +2245,7 @@ index 547b8bd0af..161331e2d8 100644
  /* Initial no-accessory TriStar register qualification fixture. The original
   * N42 13A344 AppleTHS7383::start reads register 0x0f as one byte and publishes
   * it as TriStar REV; the byte is not an acceptance test. Revision zero names
-@@ -2774,9 +3220,11 @@ static const TypeInfo a6_i2c_type = {
+@@ -2774,9 +3263,11 @@ static const TypeInfo a6_i2c_type = {
  static void a6_register_types(void)
  {
      type_register_static(&a6_pmu_type);
@@ -2370,6 +2545,84 @@ index 29f91179ef..228334a2ba 100644
                  utc.tm_hour, utc.tm_min, utc.tm_sec);
  }
  
+diff --git a/hw/usb/dev-bcm-hsic.c b/hw/usb/dev-bcm-hsic.c
+index e26306cc1b..56fed951d0 100644
+--- a/hw/usb/dev-bcm-hsic.c
++++ b/hw/usb/dev-bcm-hsic.c
+@@ -31,6 +31,7 @@
+ #define BCM_DL_BAD_CRC 3
+ #define BCM_DL_RUNNABLE 4
+ #define BCM_DL_IMAGE_TOOBIG 7
++#define BCM_RANDALL_PRODUCT "M=HEIN V=u"
+ 
+ #define TYPE_BCM_HSIC "usb-bcm-hsic"
+ OBJECT_DECLARE_SIMPLE_TYPE(BCMHSICState, BCM_HSIC)
+@@ -41,6 +42,7 @@ struct BCMHSICState {
+     uint32_t dl_state, dl_size;
+     bool dl_started, running;
+     bool reset_asserted;
++    bool randall_module;
+     BCMFullmacState fullmac;
+     GQueue *control_rx, *data_rx;
+     bool control_notified;
+@@ -202,13 +204,15 @@ static bool bcm_download_data(BCMHSICState *s, const uint8_t *data, size_t size)
+  * the SW-region bit boundaries at OTP+38/+3A, then fetches 16-bit CIS words.
+  * Expose one bounded, immutable virtual module identity. Calibration remains
+  * supplied by the native firmware/NVRAM templates, as on the other profiles. */
+-static bool bcm_otp_word(uint32_t address, uint32_t *value)
++static bool bcm_otp_word(BCMHSICState *s, uint32_t address, uint32_t *value)
+ {
+-    static const uint8_t version[] = "\x05\x00"
+-                                     "s=B2\0M=HEIN P=N41 V=t\0\0\0\xff";
++    static const uint8_t n42[] = "\x05\x00s=B2\0M=HEIN P=N41 V=t\0\0\0\xff";
++    static const uint8_t p101[] = "\x05\x00s=B2\0" BCM_RANDALL_PRODUCT "\0\0\0\xff";
++    const uint8_t *version = s->randall_module ? p101 : n42;
++    unsigned version_size = (s->randall_module ? sizeof(p101) : sizeof(n42)) - 1;
+     const uint32_t base = 0x18000800;
+     const unsigned start = 0x40;
+-    const unsigned tuple_size = 2 + sizeof(version) - 1;
++    const unsigned tuple_size = 2 + version_size;
+     const unsigned end = (start + tuple_size + 1 + 1) & ~1u;
+     unsigned offset;
+     uint32_t word = 0;
+@@ -227,7 +231,7 @@ static bool bcm_otp_word(uint32_t address, uint32_t *value)
+         if (pos == start) {
+             byte = 0x15; /* CISTPL_VERS_1 */
+         } else if (pos == start + 1) {
+-            byte = sizeof(version) - 1;
++            byte = version_size;
+         } else if (pos >= start + 2 && pos < start + tuple_size) {
+             byte = version[pos - start - 2];
+         }
+@@ -244,7 +248,7 @@ static int bcm_vendor_control(BCMHSICState *s, int request, int value,
+     if (request == 0xc111 && length == 16) {
+         uint32_t word;
+         uint32_t address = ((uint32_t)(uint16_t)index << 16) | (uint16_t)value;
+-        if (!bcm_otp_word(address, &word)) {
++        if (!bcm_otp_word(s, address, &word)) {
+             return -1;
+         }
+         memset(data, 0, 16);
+@@ -612,6 +616,11 @@ static void bcm_realize(USBDevice *dev, Error **errp)
+     s->fullmac.fw_version = "wl0: version 6.10 (qemu-ios virtual FullMAC)";
+     bcm_fullmac_setup_net(&s->fullmac, DEVICE(dev), TYPE_BCM_HSIC, "wifi0");
+     usb_desc_init(dev);
++    if (s->randall_module) {
++        /* P101 10B329 matches the B2 USI module to randall-u-st.txt and
++         * randall.trx using these native USB vendor/product tokens. */
++        usb_desc_set_string(dev, bcm_desc.id.iProduct, BCM_RANDALL_PRODUCT);
++    }
+     dev->auto_attach = 1;
+     qdev_init_gpio_in_named(DEVICE(dev), bcm_power_reset, "reset", 1);
+     qdev_init_gpio_out_named(DEVICE(dev), &s->remote_wake, "remote-wake", 1);
+@@ -644,6 +653,7 @@ static char *bcm_get_boot_status(Object *obj, Error **errp)
+ }
+ static const Property bcm_properties[] = {
+     DEFINE_PROP_MACADDR("mac", BCMHSICState, fullmac.conf.macaddr),
++    DEFINE_PROP_BOOL("randall-module", BCMHSICState, randall_module, false),
+ };
+ 
+ static void bcm_class_init(ObjectClass *klass, const void *data)
 diff --git a/include/hw/arm/ios-bytes.h b/include/hw/arm/ios-bytes.h
 new file mode 100644
 index 0000000000..abb5984f53
@@ -2451,7 +2704,7 @@ index 9daf5ecffa..34eb1f52d6 100644
  
  void sdl2_process_key(struct sdl2_console *scon,
 diff --git a/meson.build b/meson.build
-index d8b5297be2..87aeba05e7 100644
+index d8b5297be2..f737480627 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -15,7 +15,10 @@ add_test_setup('slow', exclude_suites: ['thorough'],
@@ -2466,6 +2719,49 @@ index d8b5297be2..87aeba05e7 100644
  
  ####################
  # Global variables #
+@@ -1340,6 +1343,10 @@ if not get_option('slirp').auto() or have_system
+                             cc.has_function('slirp_add_guestfwd_connector', dependencies: slirp,
+                                             prefix: '#include <libslirp.h>'))
+     slirp = subproject('slirp', default_options: ['default_library=static']).get_variable('libslirp_libdep')
++    if host_machine.system() == 'windows'
++      # The bundled static library has no DLL import table on Windows.
++      slirp = declare_dependency(dependencies: slirp, compile_args: '-DLIBSLIRP_STATIC')
++    endif
+   endif
+ endif
+ 
+diff --git a/tests/slice/a6-bcm-usb-version.c b/tests/slice/a6-bcm-usb-version.c
+index 4455b0934f..1a89004758 100644
+--- a/tests/slice/a6-bcm-usb-version.c
++++ b/tests/slice/a6-bcm-usb-version.c
+@@ -16,7 +16,7 @@ typedef struct {
+     GByteArray *download;
+     unsigned log_count;
+     uint32_t dl_state, dl_size;
+-    bool dl_started, running;
++    bool dl_started, running, randall_module;
+ } BCMHSICState;
+ static uint32_t ldl_le_p(const void *v)
+ {
+@@ -73,6 +73,18 @@ int main(void)
+     assert(!strcmp(identity, "M=HEIN P=N41 V=t"));
+     identity += strlen(identity) + 1;
+     assert(!*identity && !identity[1] && (uint8_t)identity[2] == 0xff);
++    s.randall_module = true;
++    assert(bcm_vendor_control(&s, 0xc111, 0x83a, 0x1800, 16, b) == 16);
++    end = (ldl_le_p(b + 12) >> 3) & 0x1fff;
++    assert(end > begin && end - begin <= sizeof(cis));
++    for (unsigned offset = begin; offset < end; offset += 2) {
++        assert(bcm_vendor_control(&s, 0xc111, 0x800 + offset, 0x1800, 16, b) == 16);
++        memcpy(cis + offset - begin, b + 12, 2);
++    }
++    static const char randall[] = "s=B2\0M=HEIN V=u\0\0\0\xff";
++    assert(cis[1] + 2u < end - begin && cis[1] == sizeof(randall) + 1);
++    assert(!memcmp(cis + 4, randall, sizeof(randall) - 1));
++    s.randall_module = false;
+     assert(bcm_vendor_control(&s, 0xc111, 0x839, 0x1800, 16, b) == -1);
+     assert(bcm_vendor_control(&s, 0xc111, 0x800, 0x1900, 16, b) == -1);
+     assert(bcm_vendor_control(&s, 0xc111, 0x838, 0x1800, 17, b) == -1);
 diff --git a/tests/slice/a6-h4-isp-transport.c b/tests/slice/a6-h4-isp-transport.c
 index 51f4b264a8..4406e1571e 100644
 --- a/tests/slice/a6-h4-isp-transport.c
@@ -2510,14 +2806,105 @@ index 51f4b264a8..4406e1571e 100644
      stl_le_p(args, 1);
      stl_le_p(args + 4, 4);
      assert(!h4_io_command(&s, 0x107, args, 8, 8) && s.sensor[1].mode == 4);
+diff --git a/tests/slice/a6-hsic-ready.c b/tests/slice/a6-hsic-ready.c
+index 0cb438bea0..54b0e6b620 100644
+--- a/tests/slice/a6-hsic-ready.c
++++ b/tests/slice/a6-hsic-ready.c
+@@ -1,5 +1,6 @@
+-/* Native N42 readiness wiring must never acknowledge a missing peer.
+- * SLICE hw/arm/s5l8950.c fn a6_hsic_ready a6_wlan_reset
++/* Native N42 and P101 handshakes use their own physical EHCI ports and GPIOs.
++ * SLICE hw/arm/s5l8950.c typedef A6WlanWiring
++ * SLICE hw/arm/s5l8950.c fn a6_wlan_wiring a6_wlan_device a6_hsic_ready a6_wlan_reset
+  */
+ #include <assert.h>
+ #include <stdbool.h>
+@@ -39,6 +40,7 @@ typedef struct {
+     USBBus *hsic_bus;
+     GPIO *gpio;
+     USBDevice *baseband_usb;
++    bool p101;
+ } S5L8950State;
+ #define QTAILQ_FOREACH(p, h, f) for ((p) = (h)->first; (p); (p) = (p)->f)
+ static int *qdev_get_gpio_in(GPIO *g, int pin)
+@@ -93,6 +95,28 @@ int main(void)
+     wifi.attached = true;
+     a6_wlan_reset(&s, 0, 1);
+     assert(!gpio.levels[57]);
+-    puts(
+-        "PASS: HSIC host-ready acknowledgement, absent/disconnected peers and independent modem/WLAN GPIOs");
++    /* P101: the original DT maps Wi-Fi to port 2, GPIO 1.3, 24.4 and
++     * 25.4, with active-low reset on PMU GPIO 3. Port 4 is unrelated. */
++    s.p101 = true;
++    const A6WlanWiring *wiring = a6_wlan_wiring(&s);
++    assert(!strcmp(wiring->port, "2") && wiring->host_ready == 11 &&
++           wiring->device_ready == 196 && wiring->remote_wake == 204 &&
++           wiring->pmu_reset == 3);
++    wifi.bcm = true;
++    p2.dev = NULL;
++    a6_hsic_ready(&s, 1, 1);
++    assert(!gpio.levels[196] && !a6_wlan_device(&s));
++    p2.dev = &wifi;
++    a6_hsic_ready(&s, 1, 1);
++    assert(gpio.levels[196] && !gpio.levels[57]);
++    a6_hsic_ready(&s, 1, 0);
++    assert(!gpio.levels[196]);
++    a6_wlan_reset(&s, 0, 0);
++    assert(wifi.reset == 1 && !gpio.levels[196]);
++    a6_wlan_reset(&s, 0, 1);
++    assert(wifi.reset == 0 && gpio.levels[196]);
++    wifi.attached = false;
++    a6_wlan_reset(&s, 0, 1);
++    assert(!gpio.levels[196]);
++    puts("PASS: N42/P101 HSIC port, GPIO handshakes and BCM power reset");
+ }
+diff --git a/tests/slice/a6-hsic-remote-wake.c b/tests/slice/a6-hsic-remote-wake.c
+index 6d164e713e..66eeb88c81 100644
+--- a/tests/slice/a6-hsic-remote-wake.c
++++ b/tests/slice/a6-hsic-remote-wake.c
+@@ -2,7 +2,8 @@
+  * high) idle low and rise only when a peer queues data for the host, which
+  * AppleUSBHSICPort samples on every port suspend: idle high, they resumed both
+  * links at once, 15 times a second with no traffic.
+- * SLICE hw/arm/s5l8950.c fn a6_wire_remote_wake
++ * SLICE hw/arm/s5l8950.c typedef A6WlanWiring
++ * SLICE hw/arm/s5l8950.c fn a6_wlan_wiring a6_wlan_device a6_wire_remote_wake
+  * SLICE hw/usb/dev-bcm-hsic.c fn bcm_fullmac_output bcm_data
+  * SLICE hw/usb/dev-mdm9x15.c fn mdm_wake mdm_data
+  * PKG glib-2.0
+@@ -88,6 +89,7 @@ typedef struct {
+     USBBus *hsic_bus;
+     GPIO *gpio;
+     USBDevice *baseband_usb;
++    bool p101;
+ } S5L8950State;
+ typedef int Notifier;
+ static S5L8950State *machine;
+@@ -266,6 +268,15 @@ int main(void)
+     poll_in(mdm_data, &mdm.parent_obj, 3, USB_RET_NAK);
+     assert(!gpio.level[10]);
+ 
++    /* The Wi-Fi-only iPad reserves port 2 for this module and uses GPIO
++     * 25.4. The iPhone's baseband wake pin is unrelated on this board. */
++    memset(&gpio, 0, sizeof(gpio));
++    s.p101 = true;
++    s.baseband_usb = NULL;
++    strcpy(wlan.path, "2");
++    a6_wire_remote_wake(NULL, NULL);
++    assert(gpio.rest_low[204] && !gpio.rest_low[10] && !gpio.rest_low[200]);
++    assert(bcm.parent_obj.remote_wake == &gpio.level[204]);
+     g_queue_free(bcm.control_rx);
+     g_queue_free(bcm.data_rx);
+     puts("PASS: HSIC remote-wake lines idle low and rise for queued data");
 diff --git a/tests/slice/a6-mca-pcm.c b/tests/slice/a6-mca-pcm.c
-index 9d9d825c9d..049f9f29f2 100644
+index 9d9d825c9d..d71cd999a6 100644
 --- a/tests/slice/a6-mca-pcm.c
 +++ b/tests/slice/a6-mca-pcm.c
 @@ -1,6 +1,6 @@
  /* Native N42 MCA startup/stop words against production MMIO/PCM dispatch.
-  * SLICE hw/arm/s5l8930_i2s.c define I2S_(CTRL|CTRL_TX_IDLE|TXFIFO|RXFIFO|TXCOM|RXCOM|CMD_RUN)[[:space:]]
+- * SLICE hw/arm/s5l8930_i2s.c define I2S_(CTRL|CTRL_TX_IDLE|TXFIFO|RXFIFO|TXCOM|RXCOM|CMD_RUN)[[:space:]]
 - * SLICE hw/arm/s5l8930_i2s.c fn i2s_tx_running i2s_push i2s_read i2s_write
++ * SLICE hw/arm/s5l8930_i2s.c define I2S_(CTRL|CTRL_TX_IDLE|TXFIFO|RXFIFO|TXCOM|RXCOM|CMD_ENABLE)[[:space:]]
 + * SLICE hw/arm/s5l8930_i2s.c fn i2s_set_in_rate i2s_tx_running i2s_push i2s_read i2s_write
   * CFLAGS -Wall -Wextra -Werror -Wno-unused-parameter
   */
@@ -2572,7 +2959,7 @@ index 9d9d825c9d..049f9f29f2 100644
      /* Original 11A465 startup writes: reset, sample padding, masks and TX
       * configuration. MCA +0 must not acquire the legacy I2S idle bit. */
      i2s_write(&s, 0x44, 0x301, 4);
-@@ -77,18 +89,30 @@ int main(void)
+@@ -77,18 +89,37 @@ int main(void)
      i2s_write(&s, 0x40, 0x1000, 4);
      assert(i2s_read(&s, 0x40, 4) == 0x2000);
      assert(i2s_read(&s, 0x3c, 4) == 0); /* Stopped RX stays silent. */
@@ -2597,17 +2984,24 @@ index 9d9d825c9d..049f9f29f2 100644
 +    i2s_write(&s, 0x2c, 0, 4);
 +    assert(!s.in_level && !s.in_rate && !s.voice_in && input_closes == 2);
 +    s.mca = false;
-+    i2s_write(&s, I2S_RXCOM, I2S_CMD_RUN, 4);
++    /* Stock 10B329 P101 Samsung I2S commands include the v3 format bits. */
++    i2s_write(&s, I2S_RXCOM, 0x01fd4a02, 4);
++    assert(!s.in_rate && !input_active);
++    i2s_write(&s, I2S_RXCOM, 0x01fd4a06, 4);
 +    assert(input_opens == 3 && s.in_rate == 48000 && input_active);
 +    s.rx_pos = 1;
 +    s.in_level = 16;
 +    i2s_write(&s, I2S_RXCOM, 0, 4);
 +    assert(!s.rx_pos && !s.in_level && input_closes == 3 && !input_active);
++    i2s_write(&s, I2S_TXCOM, 0x01fd4a06, 4);
++    assert(active);
++    i2s_write(&s, I2S_TXCOM, 0x01fd4a02, 4);
++    assert(!active);
      puts(
          "PASS: native MCA register layout, TX gate, PCM bytes, W1C and FIFO reset retention");
  }
 diff --git a/tests/slice/a6-pmu-adc.c b/tests/slice/a6-pmu-adc.c
-index 410c69b46f..696608a910 100644
+index 410c69b46f..8aa5428740 100644
 --- a/tests/slice/a6-pmu-adc.c
 +++ b/tests/slice/a6-pmu-adc.c
 @@ -15,7 +15,7 @@ typedef struct QEMUTimer {
@@ -2619,7 +3013,7 @@ index 410c69b46f..696608a910 100644
      uint16_t adc_input;
      uint32_t rtc_latch;
      int irq, ap_power, gpio[12];
-@@ -88,6 +88,51 @@ static void write_reg(A6PMU *s, uint8_t reg, uint8_t value)
+@@ -88,6 +88,57 @@ static void write_reg(A6PMU *s, uint8_t reg, uint8_t value)
      address(s, reg);
      a6_pmu_send(s, value);
  }
@@ -2630,6 +3024,12 @@ index 410c69b46f..696608a910 100644
 +               .adc_input = 0xabc, .adc_timer = &timer};
 +    a6_pmu_reset(&s);
 +    assert(s.regs[0x15] == 0xff && s.regs[0x1e] == 0xff && irq_level == 1);
++    /* P101's stock WLAN driver asserts and releases PMU GPIO3 via 0x6b. */
++    s.gpio[3] = 103;
++    write_reg(&s, 0x6b, 0x02);
++    assert(gpio_levels[3]);
++    write_reg(&s, 0x6b, 0x00);
++    assert(!gpio_levels[3]);
 +    /* GPIO14 is high on an uncovered iPad. Keep the other inputs intact. */
 +    s.regs[0x0e] = 0x05;
 +    address(&s, 0x0e);
@@ -2671,7 +3071,7 @@ index 410c69b46f..696608a910 100644
  int main(void)
  {
      QEMUTimer timer = {0};
-@@ -271,6 +316,7 @@ int main(void)
+@@ -271,6 +322,7 @@ int main(void)
      s.regs[0x48] = 0x2a;
      a6_pmu_adc_complete(&s);
      assert((s.regs[0x49] | (s.regs[0x4a] << 4)) == 0xabc);
@@ -2971,9 +3371,18 @@ index 9c23ddb69f..55420a436c 100644
      uint8_t *src, *src_next;
      size_t src_size, src_len;
 diff --git a/tests/slice/ipad1-i2s-rate.c b/tests/slice/ipad1-i2s-rate.c
-index 4a9577ce10..dd51b4eb66 100644
+index 4a9577ce10..6d90db4242 100644
 --- a/tests/slice/ipad1-i2s-rate.c
 +++ b/tests/slice/ipad1-i2s-rate.c
+@@ -11,7 +11,7 @@
+  * (s5l8930_i2s_sync_rate) and the voice must play at that rate too, not at the one TX started with.
+  *
+  * SLICE hw/arm/ipod_touch_cs42l58.c fn cs42l58_sample_rate cs42l58_send
+- * SLICE hw/arm/s5l8930_i2s.c define I2S_(CTRL|TXCON|TXCON_EXT_CLK|TXCOM|CMD_RUN|MCLK_DIV|FRAME_BITS|FRAME_MASTER)[[:space:]]
++ * SLICE hw/arm/s5l8930_i2s.c define I2S_(CTRL|TXCON|TXCON_EXT_CLK|TXCOM|CMD_ENABLE|MCLK_DIV|FRAME_BITS|FRAME_MASTER)[[:space:]]
+  * SLICE hw/arm/s5l8930_i2s.c range static S5L8930I2SState *i2s_ports | static void i2s_in_cb
+  * SLICE hw/arm/s5l8930_i2s.c fn i2s_tx_running i2s_set_rate i2s_lrclk_update s5l8930_i2s_sync_rate
+  * CFLAGS -Wall -Werror
 @@ -41,7 +41,7 @@ typedef struct S5L8930I2SState {
      Clock *lrclk;
      uint64_t nco_base;
@@ -2991,6 +3400,24 @@ index 4a9577ce10..dd51b4eb66 100644
  #include "slice.h"
  
  static void codec_write(CS42L58State *codec, uint8_t reg, uint8_t value)
+@@ -110,7 +111,7 @@ int main(void)
+     i2s_ports[0] = &i2s0;
+     i2s0 = (S5L8930I2SState) { .lrclk = &lrclk, .rate = 44100, .voice = &i2s0,
+                              .out_channels = 2, .out_bytes = 2 };
+-    i2s0.regs[I2S_TXCOM >> 2] = I2S_CMD_RUN;
++    i2s0.regs[I2S_TXCOM >> 2] = 6;
+     i2s0.regs[I2S_TXCON >> 2] = 0x03100081;        /* 10B500's TX config: the codec's slave */
+     i2s0.regs[I2S_FRAME_BITS >> 2] = 0x28000300;
+ 
+@@ -149,7 +150,7 @@ int main(void)
+      * chain's start takes the voice along. */
+     i2s0.regs[I2S_TXCON >> 2] = 0x03000081;
+     i2s0.regs[I2S_FRAME_BITS >> 2] = 0xc8000300;
+-    i2s0.regs[I2S_TXCOM >> 2] = I2S_CMD_RUN;
++    i2s0.regs[I2S_TXCOM >> 2] = 6;
+     nco_bclk = 64 * 44100;
+     assert(s5l8930_i2s_sync_rate(0) == 44100 && voice_rate == 44100);
+     nco_bclk = 64 * 22050;
 @@ -160,11 +161,15 @@ int main(void)
      i2s0.regs[I2S_TXCOM >> 2] = 0;
      nco_bclk = 64 * 16000;

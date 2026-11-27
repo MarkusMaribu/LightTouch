@@ -123,6 +123,11 @@ int main(int argc, char **argv) {
                 args = ipad4.engine(options, self.system / "boot", self.system / "nand", display,
                                     self.system / "serial", restore_stream="system" if display == "none" else None)
                 self.assertEqual(args[args.index("-audio") + 1], "driver=" + driver)
+                if display == "none":
+                    self.assertNotIn("-netdev", args)
+                else:
+                    self.assertEqual(args[args.index("-netdev") + 1], "user,id=wifi0,lan=off")
+                    self.assertIn("port=2", args[args.index("-device") + 1].split(","))
                 machine = args[args.index("-M") + 1].split(",")
                 for flag in ("audio-ports-probe=on", "ae2-probe=on", "tristar-probe=on"):
                     self.assertEqual(flag in machine, display != "none")

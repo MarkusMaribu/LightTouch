@@ -40,7 +40,7 @@ mkdir qemu-build
 )
 ```
 
-Set `QEMU_SRC` to the patched engine source checkout. On Windows, run the build in MSYS2 UCRT64 and use the `qemu-system-arm.exe` target. For an interactive Windows build, install SDL2, add `--enable-sdl` and set `--audio-drv-list=sdl` to include microphone capture and playback. A Cocoa build uses the Core Audio driver.
+Set `QEMU_SRC` to the patched engine source checkout. On Windows, run the build in MSYS2 UCRT64 and use the `qemu-system-arm.exe` target. For an interactive Windows build, install SDL2 and libslirp, add `--enable-sdl --enable-slirp` and set `--audio-drv-list=sdl`. The engine builds its pinned libslirp subproject when the system library lacks its network controls. A Cocoa build uses the Core Audio driver.
 
 ```sh
 "$QEMU" -L "$QEMU_BIOS" -M "iPad-4-wifi,kboot=$OUT/restore.kboot" -m 1G \
@@ -130,7 +130,11 @@ Press **F6** in the SDL window to alternate between portrait and landscape. This
 
 Press **F7** in the emulator window to put the iPad to sleep. Press **F7** again to wake it at the iOS lock screen. Holding the key triggers the shortcut once.
 
-To turn on Siri, open **Settings → General → Siri**, turn the switch on, then tap **Enable**. The offline test used **English (United States)**. Press **F8** in the SDL window or hold **Home** for about two seconds. Both gestures invoke the iPad’s Home-button hold. On an offline iPad, Siri shows “Connect to the Internet.” Apple lists iOS 7 as the minimum for its current Siri service. [Apple Support](https://support.apple.com/en-us/105037)
+The iPad’s Wi-Fi network is named **qemu-ios**. Open **Settings → Wi-Fi** and select it if the iPad has not joined automatically. The blue arrow beside the selected network opens its DHCP details. The virtual Broadcom BCM4334 connects to the host’s internet connection through QEMU user-mode networking. The launcher uses `lan=off` to keep the host’s local network private.
+
+To turn on Siri, open **Settings → General → Siri**, turn the switch on, then tap **Enable**. The test used **English (United States)**. Press **F8** in the SDL window or hold **Home** for about two seconds. Both gestures invoke the iPad’s Home-button hold. On an offline iPad, Siri shows “Connect to the Internet.” iOS 6 sends speech to a server for recognition. [Apple’s iOS 6.1 iPad guide, page 40](https://cdsassets.apple.com/live/6GJYWVAV/user/ma1659_ipad_ios6_user_guide.pdf#page=40)
+
+On a connected test iPad, Siri displayed “What can I help you with?” and the guest audio driver received a synthesized “Tell me a joke” through the microphone. With the factory trust store, the request stopped during TLS negotiation. Safari on the same iPad reported that it could not verify the certificate for `guzzoni.apple.com`. The certificate's issuer was Apple Public EV Server RSA CA 1 - G1, which chains to DigiCert Global Root G2. [Apple’s certificate validation page](https://valid-gr2-rsa.apple.com/)
 
 The Windows upgrade includes a locally built `runtime/repair-audio.kboot` for iPads prepared with `--silent-audio`. On first launch it checks the stock 10B329 plug-in, moves it back into the HAL directory if needed, and verifies it after a read-only remount. It mounts only the System volume. The launcher writes `device/nand/audio-hal-v1.ok` after verification and clean guest shutdown. See `device/repair-audio.log` for the result.
 

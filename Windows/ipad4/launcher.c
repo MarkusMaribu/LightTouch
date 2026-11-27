@@ -157,6 +157,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments,
         L"display-probe=on,quiet-boot=on,wake-on-boot=on,"
         L"audio-ports-probe=on,ae2-probe=on,tristar-probe=on%ls -m 1G "
         L"-display sdl,show-cursor=on -monitor none "
+        L"-netdev user,id=wifi0,lan=off -device usb-bcm-hsic,id=wlan,bus=usb-bus.0,port=2 "
         L"-audio driver=sdl -no-reboot -serial file:device/boot.log", panel_option);
     STARTUPINFOW startup = {
         .cb = sizeof(startup),
